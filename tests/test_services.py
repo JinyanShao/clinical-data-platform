@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import Session
-
-from clinical_research_data_platform.services import (
+from clinical_data_platform.services import (
     EncounterService,
     ImportJobService,
     ObservationService,
     PatientService,
 )
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import Session
+
+from alembic import command
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,7 +54,7 @@ def test_services_create_patient_encounter_observation(session: Session) -> None
         code_system="LOINC",
         value="5.2",
         unit="mmol/L",
-        observed_at=datetime.now(timezone.utc),
+        observed_at=datetime.now(UTC),
         status="final",
     )
 
@@ -71,7 +71,7 @@ def test_duplicate_patient_is_rejected(session: Session) -> None:
 
 
 def test_encounter_rejects_missing_patient(session: Session) -> None:
-    with pytest.raises(ValueError, match="patient does not exist"):
+    with pytest.raises(ValueError, match="patient not found"):
         EncounterService(session).create(
             patient_id=uuid4(),
             external_id="encounter-missing-patient",
@@ -82,7 +82,7 @@ def test_encounter_rejects_missing_patient(session: Session) -> None:
 
 def test_encounter_rejects_end_before_start(session: Session) -> None:
     patient = PatientService(session).create("patient-time")
-    started_at = datetime.now(timezone.utc)
+    started_at = datetime.now(UTC)
 
     with pytest.raises(ValueError, match="ended_at"):
         EncounterService(session).create(
@@ -113,7 +113,7 @@ def test_observation_rejects_other_patients_encounter(session: Session) -> None:
             code="718-7",
             code_system="LOINC",
             value="5.2",
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             status="final",
         )
 
@@ -124,4 +124,3 @@ def test_import_job_rejects_illegal_status_transition(session: Session) -> None:
 
     with pytest.raises(ValueError, match="cannot transition"):
         service.set_status(import_job.id, "completed")
-

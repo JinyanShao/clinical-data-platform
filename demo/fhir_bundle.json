@@ -1,0 +1,54 @@
+{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:demo-fhir-patient-001",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "demo-fhir-patient-001",
+        "birthDate": "1988-06-17",
+        "gender": "female"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:demo-fhir-encounter-001",
+      "resource": {
+        "resourceType": "Encounter",
+        "id": "demo-fhir-encounter-001",
+        "status": "finished",
+        "class": {"code": "AMB"},
+        "subject": {"reference": "urn:uuid:demo-fhir-patient-001"},
+        "period": {
+          "start": "2026-01-15T08:00:00Z",
+          "end": "2026-01-15T08:40:00Z"
+        }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "id": "demo-fhir-observation-001",
+        "status": "final",
+        "code": {
+          "coding": [
+            {"system": "http://loinc.org", "code": "718-7"}
+          ]
+        },
+        "subject": {"reference": "urn:uuid:demo-fhir-patient-001"},
+        "encounter": {"reference": "urn:uuid:demo-fhir-encounter-001"},
+        "valueQuantity": {"value": 5.4, "unit": "mmol/L"},
+        "effectiveDateTime": "2026-01-15T08:20:00Z"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "ResearchStudy",
+        "id": "demo-fhir-study-resource",
+        "title": "Imported FHIR Study Metadata",
+        "description": "Synthetic metadata included in the demo Bundle.",
+        "status": "active"
+      }
+    }
+  ]
+}

@@ -1,124 +1,61 @@
-# Database Schema
+# Database schema
 
-## Conventions
+PostgreSQL is the release database. Primary keys are UUIDs, timestamps are timezone-aware, JSON payloads use JSONB, and controlled statuses have database check constraints in addition to application validation.
 
-- PostgreSQL.
-- Primary keys are `UUID`.
-- Timestamps use `TIMESTAMPTZ`.
-- `created_at` and `updated_at` are only present where listed in v1.
-- Application validation enforces controlled vocabularies for status-like fields.
-- No hard-delete workflow is defined in v1.
+## Clinical tables
 
-## patients
+### patients
 
-- `id` UUID PK
-- `external_id` TEXT NOT NULL UNIQUE
-- `birth_date` DATE NULL
-- `sex` TEXT NULL
-- `created_at` TIMESTAMPTZ NOT NULL
-- `updated_at` TIMESTAMPTZ NOT NULL
+Canonical patient identity: unique `external_id`, optional `birth_date` and `sex`, plus creation/update timestamps.
 
-Purpose: canonical patient identity and deduplication boundary.
+### encounters
 
-## encounters
+Unique `external_id`, required Patient foreign key, status/type, optional start/end timestamps, and a Patient index.
 
-- `id` UUID PK
-- `patient_id` UUID NOT NULL FK -> `patients.id`
-- `external_id` TEXT NOT NULL UNIQUE
-- `status` TEXT NOT NULL
-- `encounter_type` TEXT NOT NULL
-- `started_at` TIMESTAMPTZ NULL
-- `ended_at` TIMESTAMPTZ NULL
+### observations
 
-Indexes:
+Unique `external_id`, required Patient and optional Encounter foreign keys, coded value fields, observation timestamp/status, and Patient/Encounter indexes.
 
-- `patient_id`
-- `external_id`
+### research_studies
 
-Purpose: time-bounded clinical episode tied to one patient.
+Optional unique external identity, title, description, and status. Title is indexed for catalog lookup.
 
-## observations
+## Access-control tables
 
-- `id` UUID PK
-- `patient_id` UUID NOT NULL FK -> `patients.id`
-- `encounter_id` UUID NULL FK -> `encounters.id`
-- `external_id` TEXT NOT NULL UNIQUE
-- `code` TEXT NOT NULL
-- `code_system` TEXT NOT NULL
-- `value` TEXT NOT NULL
-- `unit` TEXT NULL
-- `observed_at` TIMESTAMPTZ NOT NULL
-- `status` TEXT NOT NULL
+### users
 
-Indexes:
+Unique username and API-key hash, role constrained to `admin`, `researcher`, or `auditor`, and creation timestamp. Plain API keys are never stored.
 
-- `patient_id`
-- `encounter_id`
-- `external_id`
+### study_access
 
-Purpose: normalized clinical facts such as laboratory measurements.
+Unique `(study_id, user_id)` grant connecting a User to a ResearchStudy.
 
-## research_studies
+### research_subjects
 
-- `id` UUID PK
-- `title` TEXT NOT NULL
-- `description` TEXT NULL
-- `status` TEXT NOT NULL
+Unique `(study_id, patient_id)` enrollment connecting a Patient to a ResearchStudy.
 
-Indexes:
+## Import tables
 
-- `title`
+### import_jobs
 
-Purpose: study metadata only; no patient membership relation yet.
+Stores source type, filename, unique file checksum, binary retry payload, optional Study binding, Celery task id, status, counters, failure reason, retry count, and lifecycle timestamps.
 
-## import_jobs
+Allowed states: `pending`, `processing`, `completed`, `partial`, and `failed`.
 
-- `id` UUID PK
-- `source_type` TEXT NOT NULL
-- `filename` TEXT NOT NULL
-- `status` TEXT NOT NULL
-- `total_records` INTEGER NOT NULL
-- `successful_records` INTEGER NOT NULL
-- `failed_records` INTEGER NOT NULL
-- `started_at` TIMESTAMPTZ NULL
-- `completed_at` TIMESTAMPTZ NULL
+### import_errors
 
-Indexes:
+Stores ImportJob foreign key, source row/entry number, field, stable error code, and message.
 
-- `status`
-- `started_at`
+### source_records
 
-Purpose: one batch import run with progress and outcome counters.
+Stores ImportJob foreign key, resource type/id pointer, source row, raw JSONB input, and unique checksum. One source row may produce Patient, Encounter, and Observation records.
 
-Allowed statuses: `pending`, `processing`, `completed`, `failed`.
+## Audit table
 
-## source_records
+### audit_logs
 
-- `id` UUID PK
-- `import_job_id` UUID NOT NULL FK -> `import_jobs.id`
-- `resource_type` TEXT NOT NULL
-- `resource_id` UUID NOT NULL
-- `source_row` INTEGER NOT NULL
-- `raw_data` JSONB NOT NULL
-- `checksum` TEXT NOT NULL
+Stores actor, action, resource type/id, optional before/after JSONB snapshots, and indexed timestamp. There is no endpoint that modifies audit entries.
 
-Constraints:
+## Migration ownership
 
-- `resource_type + resource_id` UNIQUE
-- `checksum` UNIQUE
-
-Indexes:
-
-- `import_job_id`
-- `import_job_id + source_row`
-- `resource_type + resource_id`
-- `checksum`
-
-Purpose: immutable provenance link from imported source row to the normalized resource created from it.
-
-## Notes for implementation
-
-- `resource_type` values in v1 are limited to `patient`, `encounter`, `observation`, and `research_study`.
-- `source_records.resource_id` is a generic application-level pointer and is not a foreign key.
-- `checksum` is computed from the canonicalized normalized resource payload, so repeated uploads can be deduplicated.
-- If a row fails validation, it is not stored as a successful `source_record` in v1.
+Alembic is the only schema-change mechanism. Compose runs `alembic upgrade head` before the API or worker starts, and CI runs `alembic check` against a freshly upgraded database to detect ORM/migration drift.

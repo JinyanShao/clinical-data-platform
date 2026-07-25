@@ -1,6 +1,7 @@
-from clinical_research_data_platform.db import Base
-from clinical_research_data_platform.models import (
+from clinical_data_platform.db import Base
+from clinical_data_platform.models import (
     Encounter,
+    ImportError,
     ImportJob,
     Observation,
     Patient,
@@ -11,10 +12,10 @@ from clinical_research_data_platform.models import (
 __all__ = [
     "Base",
     "Encounter",
+    "ImportError",
     "ImportJob",
     "Observation",
     "Patient",
     "ResearchStudy",
     "SourceRecord",
 ]
-

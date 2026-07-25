@@ -5,8 +5,9 @@ import sys
 from logging.config import fileConfig
 from pathlib import Path
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
+
+from alembic import context
 
 CONFIG = context.config
 
@@ -18,8 +19,8 @@ APP = ROOT / "app"
 if str(APP) not in sys.path:
     sys.path.insert(0, str(APP))
 
-from clinical_research_data_platform.db import Base  # noqa: E402
-from clinical_research_data_platform import models  # noqa: F401,E402
+from clinical_data_platform import models  # noqa: F401,E402
+from clinical_data_platform.db import Base  # noqa: E402
 
 target_metadata = Base.metadata
 

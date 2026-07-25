@@ -5,7 +5,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from clinical_research_data_platform.models import Observation
+from clinical_data_platform.models import Observation
 
 
 class ObservationRepository:
@@ -23,8 +23,8 @@ class ObservationRepository:
     def get_by_external_id(self, external_id: str) -> Observation | None:
         return self.session.scalar(sa.select(Observation).where(Observation.external_id == external_id))
 
-    def list(self) -> list[Observation]:
-        return list(self.session.scalars(sa.select(Observation)))
+    def list(self, limit: int = 100, offset: int = 0) -> list[Observation]:
+        return list(self.session.scalars(sa.select(Observation).offset(offset).limit(limit)))
 
     def update(self, observation: Observation, **fields: object) -> Observation:
         for key, value in fields.items():
@@ -35,4 +35,3 @@ class ObservationRepository:
     def delete(self, observation: Observation) -> None:
         self.session.delete(observation)
         self.session.flush()
-

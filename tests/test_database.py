@@ -1,18 +1,17 @@
 from __future__ import annotations
 
+from datetime import UTC, date, datetime
 from pathlib import Path
-from datetime import date, datetime, timezone
 from uuid import uuid4
 
 import pytest
-import sqlalchemy as sa
-from alembic import command
 from alembic.config import Config
+from clinical_data_platform.models import Encounter, Observation, Patient
 from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from clinical_research_data_platform.models import Encounter, Observation, Patient
+from alembic import command
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -49,11 +48,16 @@ def test_migration_creates_all_tables(alembic_config: tuple[Config, str]) -> Non
     inspector = inspect(engine)
     assert set(inspector.get_table_names()) == {
         "encounters",
+        "audit_logs",
+        "import_errors",
         "import_jobs",
         "observations",
         "patients",
         "research_studies",
         "source_records",
+        "study_access",
+        "research_subjects",
+        "users",
     } | {"alembic_version"}
 
 
@@ -112,7 +116,7 @@ def test_observation_can_reference_patient_and_optional_encounter(engine) -> Non
             code_system="LOINC",
             value="5.2",
             unit="mmol/L",
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             status="final",
         )
         session.add(observation)
@@ -135,7 +139,7 @@ def test_illegal_foreign_key_is_rejected(engine) -> None:
             code_system="LOINC",
             value="positive",
             unit=None,
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             status="final",
         )
         session.add(observation)

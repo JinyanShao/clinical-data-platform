@@ -5,7 +5,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from clinical_research_data_platform.models import Patient
+from clinical_data_platform.models import Patient
 
 
 class PatientRepository:
@@ -23,8 +23,8 @@ class PatientRepository:
     def get_by_external_id(self, external_id: str) -> Patient | None:
         return self.session.scalar(sa.select(Patient).where(Patient.external_id == external_id))
 
-    def list(self) -> list[Patient]:
-        return list(self.session.scalars(sa.select(Patient)))
+    def list(self, limit: int = 100, offset: int = 0) -> list[Patient]:
+        return list(self.session.scalars(sa.select(Patient).offset(offset).limit(limit)))
 
     def update(self, patient: Patient, **fields: object) -> Patient:
         for key, value in fields.items():
@@ -35,4 +35,3 @@ class PatientRepository:
     def delete(self, patient: Patient) -> None:
         self.session.delete(patient)
         self.session.flush()
-

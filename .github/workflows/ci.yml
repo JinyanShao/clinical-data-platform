@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Test with coverage
+        run: |
+          coverage run -m pytest -q
+          coverage report
+      - name: Verify migrations
+        env:
+          DATABASE_URL: sqlite:////tmp/clinical_data_platform_ci.db
+        run: |
+          alembic upgrade head
+          alembic check
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build application image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: clinical-data-platform:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

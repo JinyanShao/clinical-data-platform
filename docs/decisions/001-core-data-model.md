@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted, extended by the v0.1.0 access-control and import migrations
 
 ## Context
 
@@ -29,7 +29,7 @@ The domain will use these rules:
 - `SourceRecord` stores row-level provenance and points to exactly one imported resource through `(resource_type, resource_id)`.
 - `SourceRecord` stores provenance for each normalized resource emitted by the import pipeline.
 
-We will not introduce `ResearchStudy` to `Patient` relationships yet.
+The initial migration did not introduce `ResearchStudy` to `Patient` relationships.
 
 ## Consequences
 
@@ -38,4 +38,4 @@ We will not introduce `ResearchStudy` to `Patient` relationships yet.
 - Import idempotency can be enforced with unique constraints on `external_id` and `checksum`.
 - A single CSV row can fan out into more than one `SourceRecord`, which is necessary for imports that create both `Patient` and `Observation` from the same row.
 - Provenance is preserved without coupling source metadata into business tables.
-- Study membership and advanced authorization are deferred to a later iteration.
+- The later v0.1.0 migrations add `ResearchSubject`, `StudyAccess`, users, audit logs, import errors, and asynchronous job metadata without changing the original clinical-resource boundaries.

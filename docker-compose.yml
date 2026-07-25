@@ -1,0 +1,69 @@
+name: clinical-data-platform
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: clinical_data_platform
+      POSTGRES_USER: clinical
+      POSTGRES_PASSWORD: clinical
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinical -d clinical_data_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis_data:/data
+
+  migrate:
+    build: .
+    command: alembic upgrade head
+    environment: &app-environment
+      DATABASE_URL: postgresql+psycopg://clinical:clinical@postgres:5432/clinical_data_platform
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: development
+      ADMIN_API_KEY: demo-admin-token
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    environment: *app-environment
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build: .
+    command: celery -A clinical_data_platform.celery_app:celery_app worker --loglevel=INFO --concurrency=2
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:

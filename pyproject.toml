@@ -3,18 +3,47 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "clinical-research-data-platform"
+name = "clinical-data-platform"
 version = "0.1.0"
-description = "Clinical Research Data Interoperability Platform"
+description = "FHIR-based clinical research data platform"
 requires-python = ">=3.12"
 dependencies = [
+  "fastapi>=0.140",
   "SQLAlchemy>=2.0",
   "alembic>=1.18",
+  "uvicorn>=0.51",
   "pytest>=9.0",
+  "httpx>=0.28",
+  "python-multipart>=0.0.20",
+  "celery[redis]>=5.5",
+  "redis>=6.0",
+  "psycopg[binary]>=3.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "coverage[toml]>=7.6",
+  "ruff>=0.12",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["clinical_data_platform"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 85
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008", "E501"]
 
 [tool.setuptools.packages.find]
 where = ["app"]

@@ -31,7 +31,7 @@ Upload CSV / FHIR Bundle -> Create Import Job -> Validate -> Transform -> Store 
 - No diagnosis
 - No appointment scheduling
 - No full EHR
-- No AI
+- No predictive or generative features
 - No complex frontend
 - No support for all FHIR resources
 
