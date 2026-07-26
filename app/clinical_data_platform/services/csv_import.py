@@ -115,8 +115,16 @@ class CsvImportService:
     def __init__(self, session: Session) -> None:
         self.pipeline = ImportPipelineService(session)
 
-    def enqueue(self, filename: str, content: bytes, study_id=None) -> ImportJob:
-        return self.pipeline.enqueue("csv", filename, content, study_id)
+    def enqueue(
+        self,
+        filename: str,
+        content: bytes,
+        study_id=None,
+        source_namespace: str | None = None,
+    ) -> ImportJob:
+        # A CSV carries no issuing-system column, so every record it produces
+        # takes the namespace resolved for the job as a whole.
+        return self.pipeline.enqueue("csv", filename, content, study_id, source_namespace)
 
     def process(self, job: ImportJob) -> ImportJob:
         return self.pipeline.process(job, CsvParser())

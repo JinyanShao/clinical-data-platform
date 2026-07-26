@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Generator
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///clinical_data_platform.db")
+from clinical_data_platform.config import settings
+
+# ``settings.database_url`` only falls back to a local SQLite file in
+# development; ``Settings.validate()`` (invoked at application and worker
+# startup) refuses to run any other environment without an explicit
+# DATABASE_URL, so a misconfigured deployment fails loudly instead of silently
+# serving from a throwaway file.
+DATABASE_URL = settings.database_url
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
 engine = create_engine(DATABASE_URL, connect_args=connect_args, future=True)

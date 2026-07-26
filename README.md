@@ -12,9 +12,10 @@ This project implements that complete backend workflow with synthetic data.
 
 - CSV and FHIR Bundle ingestion through one normalized import pipeline
 - Patient, Encounter, Observation, and ResearchStudy validation
-- Row/entry-level error reports with `completed`, `partial`, and `failed` outcomes
-- SHA-256 import idempotency and external identifier deduplication
-- SourceRecord provenance linking normalized resources to original input
+- Namespaced external identity `(source_namespace, external_id)`, so two sites both numbering subjects `P001` stay two records
+- Row/entry-level error reports with `completed`, `partial`, and `failed` outcomes, versioned by attempt
+- Import idempotency keyed on payload *and* target study/namespace
+- SourceRecord provenance history: every import that created or re-observed a resource, queryable per resource
 - Celery workers, Redis queueing, retry, timeout, and failure diagnostics
 - API-key authentication with admin, researcher, and auditor roles
 - ResearchStudy access grants and ResearchSubject patient isolation
@@ -59,6 +60,8 @@ The command starts PostgreSQL, Redis, migrations, FastAPI, and a Celery worker. 
 
 In Swagger, select **Authorize** and enter `demo-admin-token`.
 
+The demo token is not a fallback. It exists only because `docker-compose.yml` sets `ENABLE_DEMO_ADMIN_TOKEN=true` alongside `ENVIRONMENT=development`; enabling it in any other environment aborts startup. A deployment that configures neither `ADMIN_API_KEY` nor that flag simply has no bootstrap admin. See [Security](docs/security.md).
+
 ## Run the demo
 
 With the Compose stack running:
@@ -80,6 +83,10 @@ Inspect the results through:
 ```bash
 curl -H 'Authorization: Bearer demo-admin-token' http://localhost:8000/api/v1/import-jobs
 curl -H 'Authorization: Bearer demo-researcher-token' http://localhost:8000/api/v1/patients
+
+# Full provenance history for one resource
+curl -H 'Authorization: Bearer demo-admin-token' \
+  http://localhost:8000/api/v1/provenance/patient/<patient_id>
 ```
 
 ## Import model
@@ -94,7 +101,24 @@ FHIR -> FHIR parser --/                              |               |
                                                           provenance + audit
 ```
 
-The FHIR importer supports Bundle entries for `Patient`, `Encounter`, `Observation`, and `ResearchStudy`. It resolves `ResourceType/id`, absolute URL, and Bundle `fullUrl` references. This is a deliberately scoped clinical data pipeline, not a complete implementation of every FHIR resource or profile.
+The FHIR importer supports Bundle entries for `Patient`, `Encounter`, `Observation`, and `ResearchStudy`. It resolves `ResourceType/id`, absolute URL, and Bundle `fullUrl` references, and honours each resource's `Identifier.system` as its issuing namespace. This is a deliberately scoped clinical data pipeline, not a complete implementation of every FHIR resource or profile.
+
+## Identity and idempotency
+
+External identity is the FHIR `Identifier` pair `(system, value)`, stored as `(source_namespace, external_id)`. Namespace resolution per import: an explicit `source_namespace` wins, then a FHIR resource's own `Identifier.system`, then a namespace derived from the bound study (`urn:cdp:study:<id>`), then `urn:cdp:default`.
+
+The default is per-study isolation. Deliberate cross-study linkage stays available by passing a shared namespace:
+
+```bash
+# Two studies, same local ids, two distinct subjects
+curl -F file=@labs.csv -F study_id=$STUDY_A ... /api/v1/imports/csv
+curl -F file=@labs.csv -F study_id=$STUDY_B ... /api/v1/imports/csv
+
+# Same subject across both, stated explicitly
+curl -F file=@labs.csv -F study_id=$STUDY_B -F source_namespace=urn:hospital:mrn ...
+```
+
+Import idempotency follows the same logic: the key is `sha256(file_checksum | study_id | source_namespace)`, so re-uploading a file for the same target is a no-op while the same file aimed at a different study is a real new job.
 
 ## Roles
 
@@ -102,7 +126,7 @@ The FHIR importer supports Bundle entries for `Patient`, `Encounter`, `Observati
 | --- | --- |
 | `admin` | Imports data, modifies clinical resources, manages studies and grants |
 | `researcher` | Reads patients and clinical data in explicitly authorized studies |
-| `auditor` | Reads import reports, provenance, and audit logs without modifying data |
+| `auditor` | Reads import reports, provenance, and audit logs across every study, without modifying data |
 
 API keys are demo authentication. Production deployment should replace them with OAuth2/OIDC and managed identity. See [Security](docs/security.md).
 
@@ -121,11 +145,21 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python -m alembic upgrade head
 .venv/bin/ruff check .
-.venv/bin/coverage run -m pytest -q
+.venv/bin/coverage run -m pytest -q -m 'not integration'
 .venv/bin/coverage report
 ```
 
-The release contains **46 automated tests** and enforces at least **85% coverage** in CI. CI also verifies migration drift and builds the application image.
+The release contains **86 automated tests** and enforces at least **85% coverage** in CI.
+
+A further **5 integration tests** run only against real backends and are skipped otherwise:
+
+```bash
+export TEST_DATABASE_URL=postgresql+psycopg://clinical:clinical@localhost:5432/clinical_data_platform
+export TEST_REDIS_URL=redis://localhost:6379/0
+.venv/bin/python -m pytest -q -m integration
+```
+
+CI runs three jobs: the SQLite unit suite with lint and coverage, an integration job with PostgreSQL and Redis service containers that checks migration drift and reversibility on the real database, and an image build.
 
 ## Current limitations
 
@@ -133,6 +167,10 @@ The release contains **46 automated tests** and enforces at least **85% coverage
 - Scoped FHIR Bundle support rather than full profile/terminology validation
 - Demo API-key authentication rather than OAuth2/OIDC
 - Import payloads are stored in PostgreSQL for retry; object storage is the next scale step
+- Observation values are stored as text with numeric-aware comparison; there is no numeric column, so range queries and aggregation over values are not yet supported
+- CSV ingestion expects one fixed column order and treats `code_system` as LOINC without terminology validation
+- Uploads are read fully into memory; request-size limits and rate limiting are deployment concerns (see [Security](docs/security.md))
+- Dependencies are declared with lower bounds only; there is no lock file, so image builds are not byte-reproducible
 - No user interface beyond OpenAPI/Swagger
 - No claim of HIPAA, GDPR, or Swiss FADP certification or compliance
 
