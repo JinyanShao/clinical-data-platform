@@ -5,6 +5,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from clinical_data_platform.config import DEFAULT_SOURCE_NAMESPACE
 from clinical_data_platform.exceptions import BusinessRuleError, ConflictError, NotFoundError
 from clinical_data_platform.models import Observation
 from clinical_data_platform.repositories import (
@@ -31,12 +32,14 @@ class ObservationService:
         status: str,
         unit: str | None = None,
         encounter_id: UUID | None = None,
+        source_namespace: str = DEFAULT_SOURCE_NAMESPACE,
     ) -> Observation:
         self._validate(patient_id, encounter_id, code, code_system, value, unit)
-        if self.repo.get_by_external_id(external_id):
-            raise ConflictError("observation external_id already exists")
+        if self.repo.get_by_identity(source_namespace, external_id):
+            raise ConflictError("observation external_id already exists in this source namespace")
         return self.repo.create(
             Observation(
+                source_namespace=source_namespace,
                 patient_id=patient_id,
                 encounter_id=encounter_id,
                 external_id=external_id,
@@ -67,9 +70,15 @@ class ObservationService:
         value = fields.get("value", observation.value)
         unit = fields.get("unit", observation.unit)
         self._validate(patient_id, encounter_id, code, code_system, value, unit)
-        external_id = fields.get("external_id")
-        if external_id and external_id != observation.external_id and self.repo.get_by_external_id(str(external_id)):
-            raise ConflictError("observation external_id already exists")
+        # A PATCH body may carry an explicit null; dropping the key keeps
+        # it from being stringified to "None" and then written as NULL.
+        if fields.get("source_namespace") is None:
+            fields.pop("source_namespace", None)
+        namespace = str(fields.get("source_namespace", observation.source_namespace))
+        external_id = fields.get("external_id", observation.external_id)
+        identity_changed = (namespace, external_id) != (observation.source_namespace, observation.external_id)
+        if identity_changed and self.repo.get_by_identity(namespace, str(external_id)):
+            raise ConflictError("observation external_id already exists in this source namespace")
         return self.repo.update(observation, **fields)
 
     def _validate(

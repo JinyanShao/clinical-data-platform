@@ -132,7 +132,7 @@ def test_duplicate_patient_external_id_returns_409(client: TestClient) -> None:
 
     response = client.post("/api/v1/patients", json=payload)
     assert response.status_code == 409
-    assert response.json()["detail"] == "patient external_id already exists"
+    assert response.json()["detail"] == "patient external_id already exists in this source namespace"
 
 
 def test_validation_error_returns_422(client: TestClient) -> None:
@@ -270,6 +270,7 @@ def test_csv_import_continues_after_error_and_preserves_source(client: TestClien
     assert report["errors"] == [
         {
             "row": 3,
+            "attempt": 0,
             "field": "observation_value",
             "code": "INVALID_NUMBER",
             "message": "Expected a numeric value",
@@ -307,7 +308,11 @@ def test_csv_import_is_idempotent_for_duplicate_ids_and_reupload(client: TestCli
         assert session.scalar(select(func.count()).select_from(Patient)) == 1
         assert session.scalar(select(func.count()).select_from(Encounter)) == 1
         assert session.scalar(select(func.count()).select_from(Observation)) == 1
-        assert session.scalar(select(func.count()).select_from(SourceRecord)) == 3
+        # Provenance is now a history: row 2 created the three resources and
+        # row 3 re-asserted the same three, so six events are recorded.
+        assert session.scalar(select(func.count()).select_from(SourceRecord)) == 6
+        actions = session.scalars(select(SourceRecord.action)).all()
+        assert sorted(actions) == ["created"] * 3 + ["reasserted"] * 3
     finally:
         session.close()
 
@@ -455,8 +460,11 @@ def _study(client: TestClient, title: str) -> dict:
     return client.post("/api/v1/research-studies", json={"title": title, "status": "active"}).json()
 
 
-def _patient(client: TestClient, external_id: str) -> dict:
-    return client.post("/api/v1/patients", json={"external_id": external_id}).json()
+def _patient(client: TestClient, external_id: str, source_namespace: str | None = None) -> dict:
+    payload: dict[str, str] = {"external_id": external_id}
+    if source_namespace:
+        payload["source_namespace"] = source_namespace
+    return client.post("/api/v1/patients", json=payload).json()
 
 
 def _user(client: TestClient, username: str, role: str = "researcher") -> dict:
@@ -598,7 +606,9 @@ def test_auditor_reads_import_provenance_but_cannot_import(client: TestClient) -
 
 def test_import_binds_existing_patient_to_selected_study(client: TestClient) -> None:
     study = _study(client, "Import Study")
-    patient = _patient(client, "existing-fhir-patient")
+    # Identity is namespaced, so a resource pre-created through the API has to
+    # be placed in the namespace the study-scoped import will resolve against.
+    patient = _patient(client, "existing-fhir-patient", study["subject_namespace"])
     user = _user(client, "import-study-reader")
     client.post(f"/api/v1/research-studies/{study['id']}/access/{user['id']}")
     bundle = {
@@ -703,3 +713,248 @@ def test_ready_returns_200_when_all_dependencies_are_ready(client: TestClient, m
         lambda: {name: {"status": "ok"} for name in ("database", "redis", "worker")},
     )
     assert client.get("/ready").status_code == 200
+
+
+# ----------------------------------------------------------------------
+# Namespaced identity
+# ----------------------------------------------------------------------
+
+
+def _upload_csv_to(
+    client: TestClient,
+    content: bytes,
+    *,
+    study_id: str | None = None,
+    source_namespace: str | None = None,
+    filename: str = "clinical.csv",
+):
+    data: dict[str, str] = {}
+    if study_id:
+        data["study_id"] = study_id
+    if source_namespace:
+        data["source_namespace"] = source_namespace
+    return client.post(
+        "/api/v1/imports/csv",
+        files={"file": (filename, content, "text/csv")},
+        data=data,
+    )
+
+
+def test_same_local_id_in_two_studies_stays_two_patients(client: TestClient) -> None:
+    """The silent-merge regression: 'P001' at two sites is two people."""
+    study_a = _study(client, "Namespace Study A")
+    study_b = _study(client, "Namespace Study B")
+    content = _csv([_clinical_row(900)])
+
+    first = _upload_csv_to(client, content, study_id=study_a["id"])
+    second = _upload_csv_to(client, content, study_id=study_b["id"])
+
+    # Identical bytes, different destination: two real jobs, not a silent reuse.
+    assert first.json()["id"] != second.json()["id"]
+    assert first.json()["status"] == second.json()["status"] == "completed"
+    assert first.json()["source_namespace"] != second.json()["source_namespace"]
+
+    patients = client.get("/api/v1/patients").json()
+    matching = [p for p in patients if p["external_id"] == "csv-patient-900"]
+    assert len(matching) == 2
+    assert len({p["source_namespace"] for p in matching}) == 2
+
+
+def test_each_study_sees_only_its_own_subject(client: TestClient) -> None:
+    study_a = _study(client, "Isolated A")
+    study_b = _study(client, "Isolated B")
+    content = _csv([_clinical_row(901)])
+    _upload_csv_to(client, content, study_id=study_a["id"])
+    _upload_csv_to(client, content, study_id=study_b["id"])
+
+    reader = _user(client, "namespace-reader")
+    client.post(f"/api/v1/research-studies/{study_b['id']}/access/{reader['id']}")
+
+    _actor("researcher", reader["id"], "namespace-reader")
+    visible = client.get("/api/v1/patients").json()
+    assert len(visible) == 1
+    assert visible[0]["source_namespace"].endswith(study_b["id"])
+
+
+def test_explicit_shared_namespace_links_the_same_subject(client: TestClient) -> None:
+    """Deliberate cross-study linkage stays possible - it just has to be stated."""
+    study_a = _study(client, "Shared A")
+    study_b = _study(client, "Shared B")
+    content = _csv([_clinical_row(902)])
+    namespace = "urn:hospital:mrn"
+
+    _upload_csv_to(client, content, study_id=study_a["id"], source_namespace=namespace)
+    _upload_csv_to(client, content, study_id=study_b["id"], source_namespace=namespace)
+
+    matching = [
+        p for p in client.get("/api/v1/patients").json() if p["external_id"] == "csv-patient-902"
+    ]
+    assert len(matching) == 1
+    assert matching[0]["source_namespace"] == namespace
+
+
+def test_reupload_for_the_same_target_is_still_idempotent(client: TestClient) -> None:
+    study = _study(client, "Idempotent Study")
+    content = _csv([_clinical_row(903)])
+
+    first = _upload_csv_to(client, content, study_id=study["id"])
+    second = _upload_csv_to(client, content, study_id=study["id"])
+
+    assert first.json()["id"] == second.json()["id"]
+
+
+# ----------------------------------------------------------------------
+# Provenance history
+# ----------------------------------------------------------------------
+
+
+def test_provenance_records_every_import_that_touched_a_resource(client: TestClient) -> None:
+    first_row = _clinical_row(910)
+    second_row = _clinical_row(911)
+    second_row["patient_external_id"] = first_row["patient_external_id"]
+    second_row["encounter_external_id"] = first_row["encounter_external_id"]
+    second_row["encounter_start"] = first_row["encounter_start"]
+    second_row["encounter_end"] = first_row["encounter_end"]
+
+    first_job = _upload_csv(client, _csv([first_row]), filename="first.csv").json()
+    second_job = _upload_csv(client, _csv([second_row]), filename="second.csv").json()
+    assert first_job["id"] != second_job["id"]
+
+    patient = next(
+        item
+        for item in client.get("/api/v1/patients").json()
+        if item["external_id"] == first_row["patient_external_id"]
+    )
+    events = client.get(f"/api/v1/provenance/patient/{patient['id']}").json()
+
+    assert [event["action"] for event in events] == ["created", "reasserted"]
+    assert [event["import_job_id"] for event in events] == [first_job["id"], second_job["id"]]
+    assert [event["import_filename"] for event in events] == ["first.csv", "second.csv"]
+    assert all(event["source_row"] == 2 for event in events)
+
+
+def test_provenance_is_study_scoped_for_researchers(client: TestClient) -> None:
+    study = _study(client, "Provenance Study")
+    other = _study(client, "Provenance Other")
+    _upload_csv_to(client, _csv([_clinical_row(912)]), study_id=other["id"])
+
+    hidden = client.get("/api/v1/patients").json()[0]
+    reader = _user(client, "provenance-reader")
+    client.post(f"/api/v1/research-studies/{study['id']}/access/{reader['id']}")
+
+    _actor("researcher", reader["id"], "provenance-reader")
+    assert client.get(f"/api/v1/provenance/patient/{hidden['id']}").status_code == 403
+
+
+def test_auditor_reads_provenance_across_studies(client: TestClient) -> None:
+    _upload_csv(client, _csv([_clinical_row(913)]))
+    patient = client.get("/api/v1/patients").json()[0]
+
+    _actor("auditor")
+    response = client.get(f"/api/v1/provenance/patient/{patient['id']}")
+    assert response.status_code == 200
+    assert response.json()[0]["action"] == "created"
+
+
+# ----------------------------------------------------------------------
+# Versioned error reports
+# ----------------------------------------------------------------------
+
+
+def test_retry_versions_the_error_report(client: TestClient) -> None:
+    failed = _upload_csv(client, b"bad,header\r\n1,2\r\n").json()
+    assert failed["status"] == "failed"
+
+    client.post(f"/api/v1/import-jobs/{failed['id']}/retry")
+    errors = client.get(f"/api/v1/import-jobs/{failed['id']}/errors").json()
+
+    # One row per attempt, newest first - not two indistinguishable copies.
+    assert [error["attempt"] for error in errors] == [1, 0]
+    assert len({error["code"] for error in errors}) == 1
+
+    current = client.get(f"/api/v1/import-jobs/{failed['id']}/errors?attempt=1").json()
+    assert len(current) == 1
+    assert current[0]["attempt"] == 1
+
+
+def test_retry_rejects_a_completed_job(client: TestClient) -> None:
+    completed = _upload_csv(client, _csv([_clinical_row(920)])).json()
+    assert completed["status"] == "completed"
+
+    response = client.post(f"/api/v1/import-jobs/{completed['id']}/retry")
+    assert response.status_code == 400
+    assert "cannot transition" in response.json()["detail"]
+
+
+# ----------------------------------------------------------------------
+# Numeric equivalence on re-import
+# ----------------------------------------------------------------------
+
+
+def test_reimport_with_equivalent_number_formatting_is_not_a_conflict(client: TestClient) -> None:
+    row = _clinical_row(930)
+    row["observation_value"] = "5.2"
+    assert _upload_csv(client, _csv([row])).json()["status"] == "completed"
+
+    restated = dict(row)
+    restated["observation_value"] = "5.20"
+    second = _upload_csv(client, _csv([restated])).json()
+
+    assert second["status"] == "completed"
+    assert second["failed_records"] == 0
+    assert second["errors"] == []
+
+
+# ----------------------------------------------------------------------
+# Deterministic pagination
+# ----------------------------------------------------------------------
+
+
+def test_patient_pagination_never_repeats_or_drops_rows(client: TestClient) -> None:
+    for index in range(5):
+        _patient(client, f"page-patient-{index}")
+
+    collected = []
+    for offset in (0, 2, 4):
+        collected.extend(
+            item["id"] for item in client.get(f"/api/v1/patients?limit=2&offset={offset}").json()
+        )
+
+    assert len(collected) == 5
+    assert len(set(collected)) == 5
+
+
+def test_audit_log_pagination_is_deterministic(client: TestClient) -> None:
+    for index in range(6):
+        _patient(client, f"audit-page-{index}")
+
+    first_call = client.get("/api/v1/audit-logs?limit=3&offset=0").json()
+    second_call = client.get("/api/v1/audit-logs?limit=3&offset=0").json()
+    following = client.get("/api/v1/audit-logs?limit=3&offset=3").json()
+
+    # Repeating the same query returns the same page, and pages do not overlap.
+    assert [entry["id"] for entry in first_call] == [entry["id"] for entry in second_call]
+    assert not {entry["id"] for entry in first_call} & {entry["id"] for entry in following}
+
+
+def test_reupload_after_failure_opens_a_new_attempt(client: TestClient) -> None:
+    """Re-uploading a file that failed should retry, not silently no-op."""
+    bad = b"bad,header\r\n1,2\r\n"
+    first = _upload_csv(client, bad).json()
+    assert first["status"] == "failed"
+    assert first["retry_count"] == 0
+
+    second = _upload_csv(client, bad).json()
+    assert second["id"] == first["id"]
+    assert second["retry_count"] == 1
+
+    errors = client.get(f"/api/v1/import-jobs/{first['id']}/errors").json()
+    assert [error["attempt"] for error in errors] == [1, 0]
+
+
+def test_study_exposes_the_namespace_its_imports_will_use(client: TestClient) -> None:
+    study = _study(client, "Namespace Discovery")
+    assert study["subject_namespace"].endswith(study["id"])
+
+    patient = _patient(client, "pre-created", study["subject_namespace"])
+    assert patient["source_namespace"] == study["subject_namespace"]

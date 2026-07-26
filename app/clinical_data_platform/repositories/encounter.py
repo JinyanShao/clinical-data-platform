@@ -20,11 +20,22 @@ class EncounterRepository:
     def get_by_id(self, encounter_id: UUID) -> Encounter | None:
         return self.session.get(Encounter, encounter_id)
 
-    def get_by_external_id(self, external_id: str) -> Encounter | None:
-        return self.session.scalar(sa.select(Encounter).where(Encounter.external_id == external_id))
+    def get_by_identity(self, source_namespace: str, external_id: str) -> Encounter | None:
+        return self.session.scalar(
+            sa.select(Encounter).where(
+                Encounter.source_namespace == source_namespace,
+                Encounter.external_id == external_id,
+            )
+        )
 
     def list(self, limit: int = 100, offset: int = 0) -> list[Encounter]:
-        return list(self.session.scalars(sa.select(Encounter).offset(offset).limit(limit)))
+        statement = (
+            sa.select(Encounter)
+            .order_by(Encounter.created_at.desc(), Encounter.id)
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(statement))
 
     def update(self, encounter: Encounter, **fields: object) -> Encounter:
         for key, value in fields.items():

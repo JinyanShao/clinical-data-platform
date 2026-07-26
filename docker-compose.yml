@@ -33,7 +33,9 @@ services:
       DATABASE_URL: postgresql+psycopg://clinical:clinical@postgres:5432/clinical_data_platform
       REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: development
-      ADMIN_API_KEY: demo-admin-token
+      # The published demo token is opt-in and refused outside development.
+      # Production deployments set ADMIN_API_KEY to a generated secret instead.
+      ENABLE_DEMO_ADMIN_TOKEN: "true"
     depends_on:
       postgres:
         condition: service_healthy
