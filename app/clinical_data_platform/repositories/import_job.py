@@ -20,11 +20,24 @@ class ImportJobRepository:
     def get_by_id(self, import_job_id: UUID) -> ImportJob | None:
         return self.session.get(ImportJob, import_job_id)
 
-    def get_by_checksum(self, checksum: str) -> ImportJob | None:
-        return self.session.scalar(sa.select(ImportJob).where(ImportJob.file_checksum == checksum))
+    def get_by_idempotency_key(self, idempotency_key: str) -> ImportJob | None:
+        """Look up by the full idempotency key (payload + study + namespace).
+
+        Deliberately not keyed on ``file_checksum`` alone: the same bytes
+        imported for a different study or namespace is a different job.
+        """
+        return self.session.scalar(
+            sa.select(ImportJob).where(ImportJob.idempotency_key == idempotency_key)
+        )
 
     def list(self, limit: int = 100, offset: int = 0) -> list[ImportJob]:
-        return list(self.session.scalars(sa.select(ImportJob).offset(offset).limit(limit)))
+        statement = (
+            sa.select(ImportJob)
+            .order_by(ImportJob.created_at.desc(), ImportJob.id)
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(statement))
 
     def update(self, import_job: ImportJob, **fields: object) -> ImportJob:
         for key, value in fields.items():

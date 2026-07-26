@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import secrets
 from dataclasses import dataclass
 from uuid import UUID
@@ -11,6 +10,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from clinical_data_platform.config import settings
 from clinical_data_platform.models import User
 from clinical_data_platform.session import get_session
 
@@ -36,10 +36,12 @@ def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="authentication required")
 
     token = credentials.credentials
-    bootstrap_key = os.getenv("ADMIN_API_KEY")
-    if not bootstrap_key and os.getenv("ENVIRONMENT", "development") != "production":
-        bootstrap_key = "dev-admin-token"
-    if bootstrap_key and secrets.compare_digest(token, bootstrap_key):
+
+    # Bootstrap admin access exists only when an operator has configured it.
+    # There is deliberately no fallback token: missing configuration means no
+    # bootstrap admin, not a well-known one.
+    bootstrap_token = settings.bootstrap_admin_token
+    if bootstrap_token and secrets.compare_digest(token, bootstrap_token):
         return Principal(None, "bootstrap-admin", "admin")
 
     user = session.scalar(sa.select(User).where(User.api_key_hash == hash_api_key(token)))

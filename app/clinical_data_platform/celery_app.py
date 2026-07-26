@@ -3,9 +3,11 @@ from __future__ import annotations
 import os
 
 from celery import Celery
-from celery.signals import after_setup_logger, after_setup_task_logger
+from celery.signals import after_setup_logger, after_setup_task_logger, worker_init
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+from clinical_data_platform.config import settings
+
+REDIS_URL = settings.redis_url
 
 celery_app = Celery(
     "clinical_data_platform",
@@ -26,6 +28,12 @@ celery_app.conf.update(
     broker_transport_options={"socket_connect_timeout": 1, "socket_timeout": 1},
     worker_hijack_root_logger=False,
 )
+
+
+@worker_init.connect
+def validate_worker_configuration(**kwargs):  # noqa: ARG001
+    """Apply the same fail-closed configuration checks as the API process."""
+    settings.validate()
 
 
 def _configure_worker_logger(logger) -> None:

@@ -20,11 +20,23 @@ class PatientRepository:
     def get_by_id(self, patient_id: UUID) -> Patient | None:
         return self.session.get(Patient, patient_id)
 
-    def get_by_external_id(self, external_id: str) -> Patient | None:
-        return self.session.scalar(sa.select(Patient).where(Patient.external_id == external_id))
+    def get_by_identity(self, source_namespace: str, external_id: str) -> Patient | None:
+        """Resolve by the (system, value) identity pair, never by value alone."""
+        return self.session.scalar(
+            sa.select(Patient).where(
+                Patient.source_namespace == source_namespace,
+                Patient.external_id == external_id,
+            )
+        )
 
     def list(self, limit: int = 100, offset: int = 0) -> list[Patient]:
-        return list(self.session.scalars(sa.select(Patient).offset(offset).limit(limit)))
+        statement = (
+            sa.select(Patient)
+            .order_by(Patient.created_at.desc(), Patient.id)
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(statement))
 
     def update(self, patient: Patient, **fields: object) -> Patient:
         for key, value in fields.items():

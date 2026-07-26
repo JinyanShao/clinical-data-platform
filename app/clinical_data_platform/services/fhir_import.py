@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,16 @@ from clinical_data_platform.services.import_pipeline import (
 SUPPORTED_RESOURCES = {"Patient", "Encounter", "Observation", "ResearchStudy"}
 
 
+class ResourceRef(NamedTuple):
+    """A resolved Bundle reference, carrying the target's issuing system."""
+
+    resource_type: str
+    resource_id: str
+    #: ``Identifier.system`` declared by the target resource, if any. ``None``
+    #: means "use the import job's namespace".
+    namespace: str | None
+
+
 class FhirBundleParser:
     def parse(self, content: bytes) -> ImportBatch:
         try:
@@ -41,8 +51,8 @@ class FhirBundleParser:
         records.sort(key=lambda item: priority.get(item.raw_data.get("resourceType"), 4))
         return ImportBatch(records)
 
-    def _aliases(self, entries: list) -> dict[str, tuple[str, str]]:
-        aliases = {}
+    def _aliases(self, entries: list) -> dict[str, ResourceRef]:
+        aliases: dict[str, ResourceRef] = {}
         for entry in entries:
             if not isinstance(entry, dict) or not isinstance(entry.get("resource"), dict):
                 continue
@@ -50,13 +60,34 @@ class FhirBundleParser:
             resource_type = resource.get("resourceType")
             resource_id = resource.get("id")
             if resource_type in SUPPORTED_RESOURCES and isinstance(resource_id, str) and resource_id:
-                target = (resource_type, resource_id)
+                target = ResourceRef(resource_type, resource_id, self._identifier_system(resource))
                 aliases[f"{resource_type}/{resource_id}"] = target
                 if isinstance(entry.get("fullUrl"), str):
                     aliases[entry["fullUrl"]] = target
         return aliases
 
-    def _entry(self, index: int, entry: Any, aliases: dict[str, tuple[str, str]]) -> ImportRecord:
+    @staticmethod
+    def _identifier_system(resource: dict) -> str | None:
+        """First ``Identifier.system`` declared by the resource, if any.
+
+        FHIR identity is the pair (system, value); when the source states its
+        issuing system we honour it instead of flattening everything into the
+        import's namespace.
+        """
+        identifiers = resource.get("identifier")
+        if isinstance(identifiers, dict):
+            identifiers = [identifiers]
+        if not isinstance(identifiers, list):
+            return None
+        for identifier in identifiers:
+            if not isinstance(identifier, dict):
+                continue
+            system = identifier.get("system")
+            if isinstance(system, str) and system.strip():
+                return system.strip()
+        return None
+
+    def _entry(self, index: int, entry: Any, aliases: dict[str, ResourceRef]) -> ImportRecord:
         raw = entry.get("resource", {}) if isinstance(entry, dict) else {}
         if not isinstance(raw, dict):
             raw = {}
@@ -84,28 +115,31 @@ class FhirBundleParser:
             external_id=resource_id,
             birth_date=parse_date(birth_date, "birthDate") if birth_date else None,
             sex=sex,
+            source_namespace=self._identifier_system(resource),
         )
 
     def _encounter(self, resource: dict, resource_id: str, aliases) -> EncounterData:
-        patient_id = self._reference(resource.get("subject"), "Patient", "subject", aliases)
+        patient = self._reference(resource.get("subject"), "Patient", "subject", aliases)
         status = self._encounter_status(self._required(resource, "status"))
         period = resource.get("period") or {}
         if not isinstance(period, dict):
             raise ImportRecordError("period", "INVALID_VALUE", "Encounter.period must be an object")
         return EncounterData(
             external_id=resource_id,
-            patient_external_id=patient_id,
+            patient_external_id=patient.resource_id,
             status=status,
             encounter_type=self._encounter_type(resource),
             started_at=parse_datetime(period["start"], "period.start") if period.get("start") else None,
             ended_at=parse_datetime(period["end"], "period.end") if period.get("end") else None,
+            source_namespace=self._identifier_system(resource),
+            patient_namespace=patient.namespace,
         )
 
     def _observation(self, resource: dict, resource_id: str, aliases) -> ObservationData:
-        patient_id = self._reference(resource.get("subject"), "Patient", "subject", aliases)
-        encounter_id = None
+        patient = self._reference(resource.get("subject"), "Patient", "subject", aliases)
+        encounter = None
         if resource.get("encounter") is not None:
-            encounter_id = self._reference(resource["encounter"], "Encounter", "encounter", aliases)
+            encounter = self._reference(resource["encounter"], "Encounter", "encounter", aliases)
         coding = self._coding(resource.get("code"), "code")
         quantity = resource.get("valueQuantity")
         if not isinstance(quantity, dict) or quantity.get("value") is None:
@@ -127,14 +161,17 @@ class FhirBundleParser:
             raise ImportRecordError("status", "INVALID_VALUE", "Unsupported Observation status")
         return ObservationData(
             external_id=resource_id,
-            patient_external_id=patient_id,
-            encounter_external_id=encounter_id,
+            patient_external_id=patient.resource_id,
+            encounter_external_id=encounter.resource_id if encounter else None,
             code=coding["code"],
             code_system=coding["system"],
             value=str(quantity["value"]),
             unit=unit,
             observed_at=parse_datetime(observed_at, "effectiveDateTime"),
             status=status,
+            source_namespace=self._identifier_system(resource),
+            patient_namespace=patient.namespace,
+            encounter_namespace=encounter.namespace if encounter else None,
         )
 
     def _study(self, resource: dict, resource_id: str) -> ResearchStudyData:
@@ -146,9 +183,10 @@ class FhirBundleParser:
             title=self._required(resource, "title"),
             description=description,
             status=self._study_status(self._required(resource, "status")),
+            source_namespace=self._identifier_system(resource),
         )
 
-    def _reference(self, value: Any, expected_type: str, field: str, aliases) -> str:
+    def _reference(self, value: Any, expected_type: str, field: str, aliases) -> ResourceRef:
         if not isinstance(value, dict) or not isinstance(value.get("reference"), str):
             raise ImportRecordError(field, "REQUIRED", f"{field}.reference is required")
         reference = value["reference"]
@@ -156,10 +194,12 @@ class FhirBundleParser:
         if not target:
             parts = reference.rstrip("/").split("/")
             if len(parts) >= 2 and parts[-2] in SUPPORTED_RESOURCES:
-                target = (parts[-2], parts[-1])
-        if not target or target[0] != expected_type or not target[1]:
+                # Out-of-Bundle reference: no declared issuing system, so the
+                # job namespace applies.
+                target = ResourceRef(parts[-2], parts[-1], None)
+        if not target or target.resource_type != expected_type or not target.resource_id:
             raise ImportRecordError(field, "INVALID_REFERENCE", f"Expected a {expected_type} reference")
-        return target[1]
+        return target
 
     def _coding(self, value: Any, field: str) -> dict[str, str]:
         if not isinstance(value, dict) or not isinstance(value.get("coding"), list) or not value["coding"]:
@@ -229,8 +269,14 @@ class FhirImportService:
     def __init__(self, session: Session) -> None:
         self.pipeline = ImportPipelineService(session)
 
-    def enqueue(self, filename: str, content: bytes, study_id=None) -> ImportJob:
-        return self.pipeline.enqueue("fhir_bundle", filename, content, study_id)
+    def enqueue(
+        self,
+        filename: str,
+        content: bytes,
+        study_id=None,
+        source_namespace: str | None = None,
+    ) -> ImportJob:
+        return self.pipeline.enqueue("fhir_bundle", filename, content, study_id, source_namespace)
 
     def process(self, job: ImportJob) -> ImportJob:
         return self.pipeline.process(job, FhirBundleParser())
