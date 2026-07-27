@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import logging
 import os
 
+import redis
 from celery import Celery
-from celery.signals import after_setup_logger, after_setup_task_logger, worker_init
+from celery.signals import after_setup_logger, after_setup_task_logger, heartbeat_sent, worker_init, worker_ready
 
 from clinical_data_platform.config import settings
 
 REDIS_URL = settings.redis_url
+WORKER_HEARTBEAT_KEY = "clinical_data_platform:worker_heartbeat"
+WORKER_HEARTBEAT_TTL_SECONDS = 30
+logger = logging.getLogger(__name__)
 
 celery_app = Celery(
     "clinical_data_platform",
@@ -34,6 +39,25 @@ celery_app.conf.update(
 def validate_worker_configuration(**kwargs):  # noqa: ARG001
     """Apply the same fail-closed configuration checks as the API process."""
     settings.validate()
+
+
+def record_worker_heartbeat() -> None:
+    try:
+        redis.Redis.from_url(REDIS_URL, socket_connect_timeout=1, socket_timeout=1).set(
+            WORKER_HEARTBEAT_KEY, "ok", ex=WORKER_HEARTBEAT_TTL_SECONDS
+        )
+    except Exception:
+        logger.warning("could not update worker heartbeat", exc_info=True)
+
+
+@worker_ready.connect
+def mark_worker_ready(**kwargs):  # noqa: ARG001
+    record_worker_heartbeat()
+
+
+@heartbeat_sent.connect
+def refresh_worker_heartbeat(**kwargs):  # noqa: ARG001
+    record_worker_heartbeat()
 
 
 def _configure_worker_logger(logger) -> None:

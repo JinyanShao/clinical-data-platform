@@ -3,6 +3,8 @@ name: clinical-data-platform
 services:
   postgres:
     image: postgres:17-alpine
+    ports:
+      - "5432:5432"
     environment:
       POSTGRES_DB: clinical_data_platform
       POSTGRES_USER: clinical
@@ -17,6 +19,8 @@ services:
 
   redis:
     image: redis:7-alpine
+    ports:
+      - "6379:6379"
     command: redis-server --appendonly yes
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]

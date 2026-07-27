@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -c requirements.lock -e ".[dev]"
       - name: Lint
         run: ruff check .
       - name: Test with coverage
@@ -71,7 +71,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -c requirements.lock -e ".[dev]"
       - name: Migrate PostgreSQL and check for drift
         run: |
           alembic upgrade head
@@ -80,8 +80,12 @@ jobs:
         run: |
           alembic downgrade base
           alembic upgrade head
-      - name: Integration tests
-        run: pytest -q -m integration
+      - name: Integration tests with a real Celery worker
+        run: |
+          celery -A clinical_data_platform.celery_app:celery_app worker --loglevel=WARNING --concurrency=1 > /tmp/celery.log 2>&1 &
+          worker_pid=$!
+          trap 'cat /tmp/celery.log; kill $worker_pid || true' EXIT
+          pytest -q -m integration
 
   docker:
     runs-on: ubuntu-latest

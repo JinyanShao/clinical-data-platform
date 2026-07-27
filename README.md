@@ -142,16 +142,16 @@ API keys are demo authentication. Production deployment should replace them with
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install -c requirements.lock -e '.[dev]'
 .venv/bin/python -m alembic upgrade head
 .venv/bin/ruff check .
 .venv/bin/coverage run -m pytest -q -m 'not integration'
 .venv/bin/coverage report
 ```
 
-The release contains **86 automated tests** and enforces at least **85% coverage** in CI.
+The release contains **87 unit tests** and enforces at least **85% coverage** in CI.
 
-A further **5 integration tests** run only against real backends and are skipped otherwise:
+A further **7 integration tests** run only against real PostgreSQL, Redis, and Celery backends and are skipped otherwise:
 
 ```bash
 export TEST_DATABASE_URL=postgresql+psycopg://clinical:clinical@localhost:5432/clinical_data_platform
@@ -170,7 +170,7 @@ CI runs three jobs: the SQLite unit suite with lint and coverage, an integration
 - Observation values are stored as text with numeric-aware comparison; there is no numeric column, so range queries and aggregation over values are not yet supported
 - CSV ingestion expects one fixed column order and treats `code_system` as LOINC without terminology validation
 - Uploads are read fully into memory; request-size limits and rate limiting are deployment concerns (see [Security](docs/security.md))
-- Dependencies are declared with lower bounds only; there is no lock file, so image builds are not byte-reproducible
+- Dependency versions are pinned in `requirements.lock`; renovate or another dependency-update process is still needed for ongoing security maintenance
 - No user interface beyond OpenAPI/Swagger
 - No claim of HIPAA, GDPR, or Swiss FADP certification or compliance
 
