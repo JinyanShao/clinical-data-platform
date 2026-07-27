@@ -715,6 +715,36 @@ def test_ready_returns_200_when_all_dependencies_are_ready(client: TestClient, m
     assert client.get("/ready").status_code == 200
 
 
+def test_readiness_uses_worker_heartbeat_without_broadcast(monkeypatch) -> None:
+    import clinical_data_platform.operations as operations
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def execute(self, statement):  # noqa: ARG002
+            return None
+
+    class RedisClient:
+        def ping(self):
+            return True
+
+        def get(self, key):  # noqa: ARG002
+            return b"ok"
+
+    monkeypatch.setattr(operations, "SessionLocal", Session)
+    monkeypatch.setattr(operations.redis.Redis, "from_url", lambda *args, **kwargs: RedisClient())
+
+    assert operations.readiness_checks() == {
+        "database": {"status": "ok"},
+        "redis": {"status": "ok"},
+        "worker": {"status": "ok"},
+    }
+
+
 # ----------------------------------------------------------------------
 # Namespaced identity
 # ----------------------------------------------------------------------

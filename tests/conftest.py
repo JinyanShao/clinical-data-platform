@@ -13,8 +13,12 @@ if str(APP) not in sys.path:
 # refuses to run without an explicit DATABASE_URL. Tests declare development
 # settings before anything imports the application.
 os.environ["ENVIRONMENT"] = "development"
-os.environ["CELERY_TASK_ALWAYS_EAGER"] = "true"
 os.environ["ADMIN_API_KEY"] = "test-admin-token"
+
+if not os.getenv("TEST_DATABASE_URL"):
+    os.environ["CELERY_TASK_ALWAYS_EAGER"] = "true"
+else:
+    os.environ.pop("CELERY_TASK_ALWAYS_EAGER", None)
 
 # alembic/env.py gives DATABASE_URL precedence over the URL a caller sets with
 # config.set_main_option(). The unit fixtures rely on set_main_option to build a

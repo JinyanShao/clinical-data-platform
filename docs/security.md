@@ -16,6 +16,8 @@ Missing configuration must never produce a permissive deployment, so every defau
 
 These checks run at API startup and at Celery worker startup, so a misconfigured process fails immediately instead of serving traffic.
 
+`/ready` checks the database, Redis, and a short-lived Redis heartbeat emitted by the worker. It does not issue Celery control broadcasts on every readiness request.
+
 ## Authentication
 
 The current Bearer API keys are intentionally scoped demo authentication. Only SHA-256 hashes are stored in the database, and generated keys are returned once. The Compose stack opts into the development bootstrap key explicitly so the demo can run without an external identity provider.
@@ -48,6 +50,7 @@ SourceRecord is an append-only provenance history rather than a single origin po
 - TLS termination and secret management
 - encrypted database volumes and managed backups
 - API rate limiting and request-size limits
+- a regular dependency-update process for the pinned `requirements.lock`
 - malware scanning and object storage for uploaded files
 - formal threat modeling, retention policy, and incident response
 - jurisdiction-specific legal, privacy, and security review

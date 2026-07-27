@@ -49,7 +49,7 @@ app = FastAPI(
         "Core v1 API for patients, encounters, observations, research studies, "
         "and import job read models."
     ),
-    version="0.1.0",
+    version="0.1.1",
     openapi_tags=tags_metadata,
     lifespan=lifespan,
 )
