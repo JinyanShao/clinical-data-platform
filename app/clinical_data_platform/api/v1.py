@@ -13,6 +13,7 @@ from clinical_data_platform.api.schemas import (
     EncounterRead,
     EncounterUpdate,
     ErrorResponse,
+    ImportErrorRead,
     ImportJobRead,
     ObservationCreate,
     ObservationRead,
@@ -20,6 +21,8 @@ from clinical_data_platform.api.schemas import (
     PatientCreate,
     PatientRead,
     PatientUpdate,
+    ProvenanceEventRead,
+    ProvenanceResourceType,
     ResearchStudyCreate,
     ResearchStudyRead,
     ResearchStudyUpdate,
@@ -30,7 +33,8 @@ from clinical_data_platform.api.schemas import (
     UserCreated,
 )
 from clinical_data_platform.auth import Principal, require_roles
-from clinical_data_platform.models import SourceRecord
+from clinical_data_platform.models import ImportError as ImportErrorRow
+from clinical_data_platform.models import ImportJob, SourceRecord
 from clinical_data_platform.services import (
     CsvImportService,
     EncounterService,
@@ -59,6 +63,7 @@ router = APIRouter(
 admin = require_roles("admin")
 clinical_reader = require_roles("admin", "researcher")
 audit_reader = require_roles("admin", "auditor")
+provenance_reader = require_roles("admin", "researcher", "auditor")
 
 
 def page(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)) -> tuple[int, int]:
@@ -226,19 +231,107 @@ def list_import_jobs(pagination=Depends(page), session: Session = Depends(get_se
     return ImportJobService(session).list(limit=pagination[0], offset=pagination[1])
 
 
+@router.get(
+    "/import-jobs/{import_job_id}/errors",
+    response_model=list[ImportErrorRead],
+    tags=["Import Jobs"],
+    summary="Import errors, optionally for one attempt",
+)
+def list_import_errors(
+    import_job_id: UUID,
+    attempt: int | None = Query(
+        None,
+        ge=0,
+        description="Attempt to filter on. Omit for every attempt; use the job's retry_count for the current one.",
+    ),
+    pagination=Depends(page),
+    session: Session = Depends(get_session),
+    actor: Principal = Depends(audit_reader),
+):
+    ImportJobService(session).get(import_job_id)
+    statement = sa.select(ImportErrorRow).where(ImportErrorRow.import_job_id == import_job_id)
+    if attempt is not None:
+        statement = statement.where(ImportErrorRow.attempt == attempt)
+    statement = (
+        statement.order_by(
+            ImportErrorRow.attempt.desc(), ImportErrorRow.source_row, ImportErrorRow.id
+        )
+        .offset(pagination[1])
+        .limit(pagination[0])
+    )
+    return list(session.scalars(statement))
+
+
 @router.get("/import-jobs/{import_job_id}/source-records", response_model=list[SourceRecordRead], tags=["Import Jobs"])
 def list_source_records(import_job_id: UUID, pagination=Depends(page), session: Session = Depends(get_session), actor: Principal = Depends(audit_reader)):
     ImportJobService(session).get(import_job_id)
-    return list(session.scalars(sa.select(SourceRecord).where(SourceRecord.import_job_id == import_job_id).offset(pagination[1]).limit(pagination[0])))
+    statement = (
+        sa.select(SourceRecord)
+        .where(SourceRecord.import_job_id == import_job_id)
+        .order_by(SourceRecord.source_row, SourceRecord.id)
+        .offset(pagination[1])
+        .limit(pagination[0])
+    )
+    return list(session.scalars(statement))
+
+
+@router.get(
+    "/provenance/{resource_type}/{resource_id}",
+    response_model=list[ProvenanceEventRead],
+    tags=["Import Jobs"],
+    summary="Full provenance history for one resource",
+)
+def get_resource_provenance(
+    resource_type: ProvenanceResourceType,
+    resource_id: UUID,
+    pagination=Depends(page),
+    session: Session = Depends(get_session),
+    actor: Principal = Depends(provenance_reader),
+):
+    """Every import that produced or re-observed this resource, oldest first.
+
+    Answers "which imports, which source rows, and when" — a resource is no
+    longer limited to a single origin record.
+    """
+    StudyAccessService(session).require_resource(actor, resource_type, resource_id)
+    statement = (
+        sa.select(SourceRecord, ImportJob)
+        .join(ImportJob, ImportJob.id == SourceRecord.import_job_id)
+        .where(
+            SourceRecord.resource_type == resource_type,
+            SourceRecord.resource_id == resource_id,
+        )
+        .order_by(SourceRecord.created_at, SourceRecord.id)
+        .offset(pagination[1])
+        .limit(pagination[0])
+    )
+    return [
+        ProvenanceEventRead(
+            id=record.id,
+            import_job_id=record.import_job_id,
+            resource_type=record.resource_type,
+            resource_id=record.resource_id,
+            source_row=record.source_row,
+            raw_data=record.raw_data,
+            checksum=record.checksum,
+            action=record.action,
+            created_at=record.created_at,
+            import_filename=job.filename,
+            import_source_type=job.source_type,
+            import_study_id=job.study_id,
+            import_source_namespace=job.source_namespace,
+        )
+        for record, job in session.execute(statement).all()
+    ]
 
 
 @router.post("/import-jobs/{import_job_id}/retry", response_model=ImportJobRead, status_code=202, tags=["Import Jobs"])
 def retry_import(import_job_id: UUID, session: Session = Depends(get_session), actor: Principal = Depends(admin)):
     service = ImportJobService(session)
-    job = service.get(import_job_id)
-    service.set_status(job.id, "pending")
-    job.task_id = None
-    job.retry_count += 1
+    # Opens a new attempt through the state machine: it validates the
+    # transition, clears task_id/completed_at and bumps retry_count so the next
+    # run's errors are recorded under a new attempt number.
+    job = service.mark_pending_for_retry(import_job_id)
     AuditService(session).record(actor, "retry", "ImportJob", job.id, after={"retry_count": job.retry_count})
     return dispatch_import(session, job)
 
@@ -247,13 +340,32 @@ def retry_import(import_job_id: UUID, session: Session = Depends(get_session), a
 async def import_csv(
     file: UploadFile = File(...),
     study_id: UUID | None = Form(None),
+    source_namespace: str | None = Form(
+        None,
+        description=(
+            "Issuing system for the identifiers in this file. Defaults to a namespace "
+            "derived from study_id, so two studies using the same local ids stay separate."
+        ),
+    ),
     session: Session = Depends(get_session),
     actor: Principal = Depends(admin),
 ):
     if study_id:
         ResearchStudyService(session).get(study_id)
-    job = CsvImportService(session).enqueue(file.filename or "upload.csv", await file.read(), study_id)
-    AuditService(session).record(actor, "enqueue", "ImportJob", job.id, after={"source_type": "csv", "study_id": str(study_id) if study_id else None})
+    job = CsvImportService(session).enqueue(
+        file.filename or "upload.csv", await file.read(), study_id, source_namespace
+    )
+    AuditService(session).record(
+        actor,
+        "enqueue",
+        "ImportJob",
+        job.id,
+        after={
+            "source_type": "csv",
+            "study_id": str(study_id) if study_id else None,
+            "source_namespace": job.source_namespace,
+        },
+    )
     return dispatch_import(session, job)
 
 
@@ -261,14 +373,31 @@ async def import_csv(
 def import_fhir(
     bundle: dict = Body(...),
     study_id: UUID | None = Query(None),
+    source_namespace: str | None = Query(
+        None,
+        description=(
+            "Fallback issuing system for Bundle entries that declare no Identifier.system. "
+            "Defaults to a namespace derived from study_id."
+        ),
+    ),
     session: Session = Depends(get_session),
     actor: Principal = Depends(admin),
 ):
     if study_id:
         ResearchStudyService(session).get(study_id)
     content = json.dumps(bundle, sort_keys=True, separators=(",", ":")).encode()
-    job = FhirImportService(session).enqueue("bundle.json", content, study_id)
-    AuditService(session).record(actor, "enqueue", "ImportJob", job.id, after={"source_type": "fhir_bundle", "study_id": str(study_id) if study_id else None})
+    job = FhirImportService(session).enqueue("bundle.json", content, study_id, source_namespace)
+    AuditService(session).record(
+        actor,
+        "enqueue",
+        "ImportJob",
+        job.id,
+        after={
+            "source_type": "fhir_bundle",
+            "study_id": str(study_id) if study_id else None,
+            "source_namespace": job.source_namespace,
+        },
+    )
     return dispatch_import(session, job)
 
 

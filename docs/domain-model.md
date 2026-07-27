@@ -9,6 +9,19 @@
 
 The model is intentionally smaller than the complete FHIR specification. Source-specific FHIR and CSV fields are mapped into these normalized resources before persistence.
 
+## External identity
+
+Following the FHIR `Identifier` model, external identity is the pair `(system, value)`, stored as `(source_namespace, external_id)` on Patient, Encounter, Observation, and ResearchStudy. Uniqueness is enforced on the pair. A bare `external_id` is not globally meaningful: two research sites routinely both call a subject `P001`, and a global unique constraint on the value alone silently merged them into one record.
+
+Namespaces are resolved once per import, in this order:
+
+1. an explicit `source_namespace` supplied by the caller;
+2. for FHIR, the resource's own `Identifier.system` when it declares one;
+3. a namespace derived from the bound ResearchStudy (`urn:cdp:study:<study_id>`);
+4. `urn:cdp:default`.
+
+The default is therefore per-study isolation: identical local identifiers in two studies stay two records. Deliberate cross-study linkage remains possible, but it has to be stated by passing a shared namespace such as `urn:hospital:mrn`.
+
 ## Research access
 
 - **ResearchSubject** enrolls a Patient in a ResearchStudy.
@@ -19,9 +32,9 @@ A researcher can access a Patient only when both a StudyAccess grant and a Resea
 
 ## Import and traceability
 
-- **ImportJob** stores input type, payload, optional Study binding, Celery task identity, status, retry/failure data, counters, and timestamps.
-- **ImportError** records one row or Bundle-entry validation failure.
-- **SourceRecord** links an original input row or resource to each normalized resource created from it.
+- **ImportJob** stores input type, payload, optional Study binding, Celery task identity, status, retry/failure data, counters, and timestamps. Idempotency is keyed on `idempotency_key`, derived from the payload checksum together with the target study and namespace, so the same file can be imported for two studies while a genuine re-upload of the same file for the same target stays a no-op.
+- **ImportError** records one row or Bundle-entry validation failure, tagged with the `attempt` that produced it. Retries version the error report instead of appending duplicates to it.
+- **SourceRecord** is one provenance event: an import asserting a resource. A resource has as many events as imports that touched it, and `action` distinguishes `created` from `reasserted`.
 - **AuditLog** records significant manual writes, access changes, subject enrollment, import submission, and retries.
 
 ## Relationships

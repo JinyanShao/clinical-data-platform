@@ -12,7 +12,7 @@ from fastapi import Request
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from clinical_data_platform.celery_app import REDIS_URL, celery_app
+from clinical_data_platform.celery_app import REDIS_URL, WORKER_HEARTBEAT_KEY
 from clinical_data_platform.session import SessionLocal
 
 request_id_context = contextvars.ContextVar("request_id", default=None)
@@ -77,19 +77,16 @@ def readiness_checks() -> dict[str, dict[str, str]]:
         checks["database"] = {"status": "error", "detail": str(exc)}
 
     try:
-        redis.Redis.from_url(REDIS_URL, socket_connect_timeout=1, socket_timeout=1).ping()
+        redis_client = redis.Redis.from_url(REDIS_URL, socket_connect_timeout=1, socket_timeout=1)
+        redis_client.ping()
         checks["redis"] = {"status": "ok"}
     except Exception as exc:
         checks["redis"] = {"status": "error", "detail": str(exc)}
 
     if checks["redis"]["status"] == "error":
         checks["worker"] = {"status": "error", "detail": "check blocked by Redis failure"}
+    elif redis_client.get(WORKER_HEARTBEAT_KEY):
+        checks["worker"] = {"status": "ok"}
     else:
-        try:
-            replies = celery_app.control.inspect(timeout=1).ping()
-            if not replies:
-                raise RuntimeError("no Celery workers responded")
-            checks["worker"] = {"status": "ok"}
-        except Exception as exc:
-            checks["worker"] = {"status": "error", "detail": str(exc)}
+        checks["worker"] = {"status": "error", "detail": "no recent worker heartbeat"}
     return checks
