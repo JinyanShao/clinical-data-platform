@@ -20,11 +20,22 @@ class ObservationRepository:
     def get_by_id(self, observation_id: UUID) -> Observation | None:
         return self.session.get(Observation, observation_id)
 
-    def get_by_external_id(self, external_id: str) -> Observation | None:
-        return self.session.scalar(sa.select(Observation).where(Observation.external_id == external_id))
+    def get_by_identity(self, source_namespace: str, external_id: str) -> Observation | None:
+        return self.session.scalar(
+            sa.select(Observation).where(
+                Observation.source_namespace == source_namespace,
+                Observation.external_id == external_id,
+            )
+        )
 
     def list(self, limit: int = 100, offset: int = 0) -> list[Observation]:
-        return list(self.session.scalars(sa.select(Observation).offset(offset).limit(limit)))
+        statement = (
+            sa.select(Observation)
+            .order_by(Observation.created_at.desc(), Observation.id)
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(statement))
 
     def update(self, observation: Observation, **fields: object) -> Observation:
         for key, value in fields.items():

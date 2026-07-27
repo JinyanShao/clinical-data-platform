@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  ENVIRONMENT: development
+
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -14,12 +17,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -c requirements.lock -e ".[dev]"
       - name: Lint
         run: ruff check .
       - name: Test with coverage
         run: |
-          coverage run -m pytest -q
+          coverage run -m pytest -q -m "not integration"
           coverage report
       - name: Verify migrations
         env:
@@ -27,6 +30,62 @@ jobs:
         run: |
           alembic upgrade head
           alembic check
+
+  integration:
+    # The unit suite runs entirely on SQLite with Celery in eager mode, so this
+    # job is the only place the production backends are actually exercised:
+    # PostgreSQL (JSONB variant, psycopg driver, real constraint enforcement)
+    # and Redis.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: clinical_data_platform
+          POSTGRES_USER: clinical
+          POSTGRES_PASSWORD: clinical
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U clinical -d clinical_data_platform"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://clinical:clinical@localhost:5432/clinical_data_platform
+      TEST_DATABASE_URL: postgresql+psycopg://clinical:clinical@localhost:5432/clinical_data_platform
+      REDIS_URL: redis://localhost:6379/0
+      TEST_REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -c requirements.lock -e ".[dev]"
+      - name: Migrate PostgreSQL and check for drift
+        run: |
+          alembic upgrade head
+          alembic check
+      - name: Verify migrations reverse cleanly
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+      - name: Integration tests with a real Celery worker
+        run: |
+          celery -A clinical_data_platform.celery_app:celery_app worker --loglevel=WARNING --concurrency=1 > /tmp/celery.log 2>&1 &
+          worker_pid=$!
+          trap 'cat /tmp/celery.log; kill $worker_pid || true' EXIT
+          pytest -q -m integration
 
   docker:
     runs-on: ubuntu-latest

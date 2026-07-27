@@ -20,11 +20,22 @@ class ResearchStudyRepository:
     def get_by_id(self, study_id: UUID) -> ResearchStudy | None:
         return self.session.get(ResearchStudy, study_id)
 
-    def get_by_external_id(self, external_id: str) -> ResearchStudy | None:
-        return self.session.scalar(sa.select(ResearchStudy).where(ResearchStudy.external_id == external_id))
+    def get_by_identity(self, source_namespace: str, external_id: str) -> ResearchStudy | None:
+        return self.session.scalar(
+            sa.select(ResearchStudy).where(
+                ResearchStudy.source_namespace == source_namespace,
+                ResearchStudy.external_id == external_id,
+            )
+        )
 
     def list(self, limit: int = 100, offset: int = 0) -> list[ResearchStudy]:
-        return list(self.session.scalars(sa.select(ResearchStudy).offset(offset).limit(limit)))
+        statement = (
+            sa.select(ResearchStudy)
+            .order_by(ResearchStudy.created_at.desc(), ResearchStudy.id)
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.scalars(statement))
 
     def update(self, study: ResearchStudy, **fields: object) -> ResearchStudy:
         for key, value in fields.items():

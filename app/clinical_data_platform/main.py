@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -7,21 +10,37 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
 from clinical_data_platform.api.v1 import router
+from clinical_data_platform.config import settings
 from clinical_data_platform.exceptions import BusinessRuleError, ConflictError, ForbiddenError, NotFoundError
 from clinical_data_platform.operations import RequestContextMiddleware, configure_logging, readiness_checks
+
+logger = logging.getLogger(__name__)
 
 tags_metadata = [
     {"name": "Patients", "description": "Create, read, list, and update patient records."},
     {"name": "Encounters", "description": "Manage patient-linked clinical encounters."},
     {"name": "Observations", "description": "Manage patient observations and optional encounter links."},
     {"name": "Research Studies", "description": "Basic CRUD for research study metadata."},
-    {"name": "Import Jobs", "description": "Upload clinical CSV files and query import status and errors."},
+    {"name": "Import Jobs", "description": "Upload clinical CSV files and query import status, errors, and provenance."},
     {"name": "Access Control", "description": "Create API users and grant ResearchStudy access."},
     {"name": "Audit", "description": "Inspect immutable records of writes and permission changes."},
     {"name": "Operations", "description": "Application liveness and dependency readiness."},
 ]
 
 configure_logging()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Refuse to serve traffic on a configuration that would be permissive or
+    # non-durable. Raising here aborts startup rather than degrading quietly.
+    settings.validate()
+    logger.info(
+        "configuration validated",
+        extra={"environment": settings.environment},
+    )
+    yield
+
 
 app = FastAPI(
     title="clinical-data-platform API",
@@ -30,8 +49,9 @@ app = FastAPI(
         "Core v1 API for patients, encounters, observations, research studies, "
         "and import job read models."
     ),
-    version="0.1.0",
+    version="0.1.1",
     openapi_tags=tags_metadata,
+    lifespan=lifespan,
 )
 app.add_middleware(RequestContextMiddleware)
 app.include_router(router)

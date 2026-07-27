@@ -19,6 +19,11 @@ from clinical_data_platform.models import (
     User,
 )
 
+#: Roles that read across every study by design. Documented in
+#: ``docs/security.md``: auditors exist to inspect imports and provenance
+#: platform-wide, so study scoping does not apply to them.
+GLOBAL_READ_ROLES = frozenset({"admin", "auditor"})
+
 
 class UserService:
     def __init__(self, session: Session) -> None:
@@ -91,6 +96,12 @@ class StudyAccessService:
             raise ForbiddenError("research study access denied")
 
     def require_patient(self, principal: Principal, patient_id: UUID) -> None:
+        """Grant access when the patient is enrolled in a study the caller holds.
+
+        Now that Patient identity is namespaced, "shares a study" can no longer
+        be reached by two sites' subjects silently merging into one row under a
+        common local identifier.
+        """
         if principal.role == "admin":
             return
         if principal.id is None or not self.session.scalar(
@@ -103,58 +114,78 @@ class StudyAccessService:
         ):
             raise ForbiddenError("patient access denied")
 
+    def require_resource(self, principal: Principal, resource_type: str, resource_id: UUID) -> None:
+        """Authorise access to any provenance-bearing resource."""
+        if principal.role in GLOBAL_READ_ROLES:
+            return
+        if resource_type == "research_study":
+            self.require_study(principal, resource_id)
+            return
+        if resource_type == "patient":
+            self.require_patient(principal, resource_id)
+            return
+        if resource_type == "encounter":
+            encounter = self.session.get(Encounter, resource_id)
+            if not encounter:
+                raise NotFoundError("encounter not found")
+            self.require_patient(principal, encounter.patient_id)
+            return
+        if resource_type == "observation":
+            observation = self.session.get(Observation, resource_id)
+            if not observation:
+                raise NotFoundError("observation not found")
+            self.require_patient(principal, observation.patient_id)
+            return
+        raise NotFoundError("unknown resource type")
+
     def list_patients(self, principal: Principal, limit: int, offset: int) -> list[Patient]:
-        if principal.role == "admin":
-            return list(self.session.scalars(sa.select(Patient).offset(offset).limit(limit)))
-        statement = (
-            sa.select(Patient)
-            .join(ResearchSubject)
-            .join(StudyAccess, StudyAccess.study_id == ResearchSubject.study_id)
-            .where(StudyAccess.user_id == principal.id)
-            .distinct()
-            .offset(offset)
-            .limit(limit)
-        )
+        statement = sa.select(Patient)
+        if principal.role != "admin":
+            statement = (
+                statement.join(ResearchSubject)
+                .join(StudyAccess, StudyAccess.study_id == ResearchSubject.study_id)
+                .where(StudyAccess.user_id == principal.id)
+                .distinct()
+            )
+        statement = statement.order_by(Patient.created_at.desc(), Patient.id).offset(offset).limit(limit)
         return list(self.session.scalars(statement))
 
     def list_encounters(self, principal: Principal, limit: int, offset: int) -> list[Encounter]:
-        if principal.role == "admin":
-            return list(self.session.scalars(sa.select(Encounter).offset(offset).limit(limit)))
-        statement = (
-            sa.select(Encounter)
-            .join(ResearchSubject, ResearchSubject.patient_id == Encounter.patient_id)
-            .join(StudyAccess, StudyAccess.study_id == ResearchSubject.study_id)
-            .where(StudyAccess.user_id == principal.id)
-            .distinct()
-            .offset(offset)
-            .limit(limit)
-        )
+        statement = sa.select(Encounter)
+        if principal.role != "admin":
+            statement = (
+                statement.join(ResearchSubject, ResearchSubject.patient_id == Encounter.patient_id)
+                .join(StudyAccess, StudyAccess.study_id == ResearchSubject.study_id)
+                .where(StudyAccess.user_id == principal.id)
+                .distinct()
+            )
+        statement = statement.order_by(Encounter.created_at.desc(), Encounter.id).offset(offset).limit(limit)
         return list(self.session.scalars(statement))
 
     def list_observations(self, principal: Principal, limit: int, offset: int) -> list[Observation]:
-        if principal.role == "admin":
-            return list(self.session.scalars(sa.select(Observation).offset(offset).limit(limit)))
-        statement = (
-            sa.select(Observation)
-            .join(ResearchSubject, ResearchSubject.patient_id == Observation.patient_id)
-            .join(StudyAccess, StudyAccess.study_id == ResearchSubject.study_id)
-            .where(StudyAccess.user_id == principal.id)
-            .distinct()
-            .offset(offset)
-            .limit(limit)
-        )
+        statement = sa.select(Observation)
+        if principal.role != "admin":
+            statement = (
+                statement.join(ResearchSubject, ResearchSubject.patient_id == Observation.patient_id)
+                .join(StudyAccess, StudyAccess.study_id == ResearchSubject.study_id)
+                .where(StudyAccess.user_id == principal.id)
+                .distinct()
+            )
+        statement = statement.order_by(Observation.created_at.desc(), Observation.id).offset(offset).limit(limit)
         return list(self.session.scalars(statement))
 
     def list_studies(self, principal: Principal, limit: int, offset: int) -> list[ResearchStudy]:
-        if principal.role == "admin":
-            statement = sa.select(ResearchStudy)
-        else:
+        statement = sa.select(ResearchStudy)
+        if principal.role != "admin":
             statement = (
-                sa.select(ResearchStudy)
-                .join(StudyAccess)
+                statement.join(StudyAccess)
                 .where(StudyAccess.user_id == principal.id)
+                .distinct()
             )
-        return list(self.session.scalars(statement.offset(offset).limit(limit)))
+        statement = (
+            statement.order_by(ResearchStudy.created_at.desc(), ResearchStudy.id).offset(offset).limit(limit)
+        )
+        return list(self.session.scalars(statement))
 
 
 class AuditService:
@@ -183,8 +214,14 @@ class AuditService:
         return entry
 
     def list(self, limit: int, offset: int) -> list[AuditLog]:
+        # ``id`` is the tiebreaker: ordering on the timestamp alone was
+        # non-deterministic wherever two entries shared it, which the
+        # second-granular SQL CURRENT_TIMESTAMP made routine on SQLite.
         return list(
             self.session.scalars(
-                sa.select(AuditLog).order_by(AuditLog.timestamp.desc()).offset(offset).limit(limit)
+                sa.select(AuditLog)
+                .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
+                .offset(offset)
+                .limit(limit)
             )
         )
