@@ -182,6 +182,15 @@ CI runs three jobs: the SQLite unit suite with lint and coverage, an integration
 - [Database schema](docs/database-schema.md)
 - [Core data model decision](docs/decisions/001-core-data-model.md)
 
+## Author
+
+**JinyanShao**
+
+- Location: Fribourg, Switzerland
+- Email: [jinyanshao@proton.me](mailto:jinyanshao@proton.me)
+- LinkedIn: [linkedin.com/in/jinyanshao](https://www.linkedin.com/in/jinyanshao/)
+- Website: [jinyanshao.ch](https://jinyanshao.ch)
+
 ## License
 
 No license has been assigned. All rights are reserved by the repository owner.
