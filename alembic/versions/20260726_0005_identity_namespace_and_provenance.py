@@ -201,7 +201,11 @@ def downgrade() -> None:
     op.execute(
         sa.text(
             "DELETE FROM source_records WHERE id NOT IN ("
-            "  SELECT MIN(id) FROM source_records GROUP BY checksum"
+            "  SELECT id FROM ("
+            "    SELECT id, ROW_NUMBER() OVER ("
+            "      PARTITION BY checksum ORDER BY created_at, id"
+            "    ) AS rank_by_checksum FROM source_records"
+            "  ) ranked WHERE rank_by_checksum = 1"
             ")"
         )
     )
@@ -217,12 +221,136 @@ def downgrade() -> None:
     op.drop_index("ix_import_jobs_created_at", table_name="import_jobs")
     op.drop_index("uq_import_jobs_idempotency_key", table_name="import_jobs")
     op.drop_index("ix_import_jobs_file_checksum", table_name="import_jobs")
+    # v0.1.0 allowed only one non-null job per file checksum. Keep the earliest
+    # job for each checksum before restoring that lossy legacy constraint.
+    op.execute(
+        sa.text(
+            "DELETE FROM source_records WHERE import_job_id IN ("
+            "  SELECT id FROM ("
+            "    SELECT id, ROW_NUMBER() OVER ("
+            "      PARTITION BY file_checksum ORDER BY created_at, id"
+            "    ) AS rank_by_checksum FROM import_jobs"
+            "    WHERE file_checksum IS NOT NULL"
+            "  ) ranked WHERE rank_by_checksum > 1"
+            ")"
+        )
+    )
+    op.execute(
+        sa.text(
+            "DELETE FROM import_errors WHERE import_job_id IN ("
+            "  SELECT id FROM ("
+            "    SELECT id, ROW_NUMBER() OVER ("
+            "      PARTITION BY file_checksum ORDER BY created_at, id"
+            "    ) AS rank_by_checksum FROM import_jobs"
+            "    WHERE file_checksum IS NOT NULL"
+            "  ) ranked WHERE rank_by_checksum > 1"
+            ")"
+        )
+    )
+    op.execute(
+        sa.text(
+            "DELETE FROM import_jobs WHERE id NOT IN ("
+            "  SELECT id FROM ("
+            "    SELECT id, ROW_NUMBER() OVER ("
+            "      PARTITION BY file_checksum ORDER BY created_at, id"
+            "    ) AS rank_by_checksum FROM import_jobs"
+            "    WHERE file_checksum IS NOT NULL"
+            "  ) ranked WHERE rank_by_checksum = 1"
+            ") AND file_checksum IS NOT NULL"
+        )
+    )
     with op.batch_alter_table("import_jobs") as batch:
         batch.drop_column("updated_at")
         batch.drop_column("created_at")
         batch.drop_column("idempotency_key")
         batch.drop_column("source_namespace")
     op.create_index("uq_import_jobs_file_checksum", "import_jobs", ["file_checksum"], unique=True)
+
+    # The legacy schema cannot represent two namespaces with one external id.
+    # Downgrade is intentionally lossy: remove dependent rows belonging to
+    # duplicate identities before restoring each old global unique constraint.
+    for child_table, parent_column, parent_table in (
+        ("observations", "patient_id", "patients"),
+        ("encounters", "patient_id", "patients"),
+        ("research_subjects", "patient_id", "patients"),
+    ):
+        op.execute(
+            sa.text(
+                f"DELETE FROM {child_table} WHERE {parent_column} IN ("
+                f"  SELECT id FROM ("
+                f"    SELECT id, ROW_NUMBER() OVER ("
+                f"      PARTITION BY external_id ORDER BY created_at, id"
+                f"    ) AS rank_by_identity FROM {parent_table}"
+                f"  ) ranked WHERE rank_by_identity > 1"
+                f")"
+            )
+        )
+    op.execute(
+        sa.text(
+            "DELETE FROM patients WHERE id IN ("
+            "  SELECT id FROM ("
+            "    SELECT id, ROW_NUMBER() OVER ("
+            "      PARTITION BY external_id ORDER BY created_at, id"
+            "    ) AS rank_by_identity FROM patients"
+            "  ) ranked WHERE rank_by_identity > 1"
+            ")"
+        )
+    )
+    op.execute(
+        sa.text(
+            "DELETE FROM observations WHERE id IN ("
+            "  SELECT id FROM ("
+            "    SELECT id, ROW_NUMBER() OVER ("
+            "      PARTITION BY external_id ORDER BY created_at, id"
+            "    ) AS rank_by_identity FROM observations"
+            "  ) ranked WHERE rank_by_identity > 1"
+            ")"
+        )
+    )
+    op.execute(
+        sa.text(
+            "DELETE FROM encounters WHERE id IN ("
+            "  SELECT id FROM ("
+            "    SELECT id, ROW_NUMBER() OVER ("
+            "      PARTITION BY external_id ORDER BY created_at, id"
+            "    ) AS rank_by_identity FROM encounters"
+            "  ) ranked WHERE rank_by_identity > 1"
+            ")"
+        )
+    )
+    op.execute(
+        sa.text(
+            "DELETE FROM study_access WHERE study_id IN ("
+            "  SELECT id FROM ("
+            "    SELECT id, ROW_NUMBER() OVER ("
+            "      PARTITION BY external_id ORDER BY created_at, id"
+            "    ) AS rank_by_identity FROM research_studies"
+            "  ) ranked WHERE rank_by_identity > 1"
+            ")"
+        )
+    )
+    op.execute(
+        sa.text(
+            "DELETE FROM research_subjects WHERE study_id IN ("
+            "  SELECT id FROM ("
+            "    SELECT id, ROW_NUMBER() OVER ("
+            "      PARTITION BY external_id ORDER BY created_at, id"
+            "    ) AS rank_by_identity FROM research_studies"
+            "  ) ranked WHERE rank_by_identity > 1"
+            ")"
+        )
+    )
+    op.execute(
+        sa.text(
+            "DELETE FROM research_studies WHERE id IN ("
+            "  SELECT id FROM ("
+            "    SELECT id, ROW_NUMBER() OVER ("
+            "      PARTITION BY external_id ORDER BY created_at, id"
+            "    ) AS rank_by_identity FROM research_studies"
+            "  ) ranked WHERE rank_by_identity > 1"
+            ")"
+        )
+    )
 
     op.drop_index("uq_research_studies_identity", table_name="research_studies")
     with op.batch_alter_table("research_studies") as batch:

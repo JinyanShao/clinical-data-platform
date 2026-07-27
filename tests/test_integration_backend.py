@@ -11,6 +11,8 @@ supplies via service containers.
 from __future__ import annotations
 
 import os
+import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from alembic.config import Config
 from clinical_data_platform.models import AuditLog, ImportJob, Patient, SourceRecord
 from clinical_data_platform.services.csv_import import CSV_HEADERS, CsvImportService
 from clinical_data_platform.services.import_pipeline import ImportPipelineService
+from clinical_data_platform.tasks import dispatch_import
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -85,6 +88,30 @@ def test_migrations_round_trip_on_postgresql() -> None:
     command.upgrade(config, "head")
     command.downgrade(config, "base")
     command.upgrade(config, "head")
+
+
+@requires_postgres
+def test_upgrade_backfills_namespace_on_existing_patient() -> None:
+    config = _alembic_config()
+    command.downgrade(config, "20260725_0004")
+    engine = create_engine(DATABASE_URL, future=True)
+    patient_id = uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO patients (id, external_id, birth_date, sex) "
+                "VALUES (:id, 'legacy-patient', '1980-01-01', 'female')"
+            ),
+            {"id": patient_id},
+        )
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT external_id, source_namespace FROM patients WHERE id = :id"),
+            {"id": patient_id},
+        ).one()
+    assert row.external_id == "legacy-patient"
+    assert row.source_namespace == "urn:cdp:default"
 
 
 @requires_postgres
@@ -170,3 +197,22 @@ def test_redis_broker_is_reachable() -> None:
 
     client = redis.Redis.from_url(REDIS_URL, socket_connect_timeout=5, socket_timeout=5)
     assert client.ping() is True
+
+
+@requires_postgres
+@requires_redis
+def test_celery_worker_processes_an_import(pg_session: Session) -> None:
+    job = ImportPipelineService(pg_session).enqueue("csv", "worker.csv", _csv_bytes("celery-patient"))
+    pg_session.commit()
+    dispatch_import(pg_session, job)
+
+    for _ in range(30):
+        pg_session.expire_all()
+        result = pg_session.get(ImportJob, job.id)
+        if result and result.status == "completed":
+            break
+        time.sleep(0.5)
+    else:
+        pytest.fail("Celery worker did not complete the queued import")
+
+    assert result.successful_records == 1
