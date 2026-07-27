@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clinical-data-platform"
-version = "0.1.0"
+version = "0.1.1"
 description = "FHIR-based clinical research data platform"
 requires-python = ">=3.12"
 dependencies = [
@@ -28,6 +28,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "integration: requires real PostgreSQL/Redis (TEST_DATABASE_URL, TEST_REDIS_URL)",
+]
 
 [tool.coverage.run]
 source = ["clinical_data_platform"]
