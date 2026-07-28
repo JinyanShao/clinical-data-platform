@@ -12,8 +12,6 @@ dependencies = [
   "SQLAlchemy>=2.0",
   "alembic>=1.18",
   "uvicorn>=0.51",
-  "pytest>=9.0",
-  "httpx>=0.28",
   "python-multipart>=0.0.20",
   "celery[redis]>=5.5",
   "redis>=6.0",
@@ -23,6 +21,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "coverage[toml]>=7.6",
+  "httpx>=0.28",
+  "pytest>=9.0",
   "ruff>=0.12",
 ]
 
