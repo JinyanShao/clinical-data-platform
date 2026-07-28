@@ -95,7 +95,7 @@ Researchers can query a Patient only when a StudyAccess grant and ResearchSubjec
 ## Operational behavior
 
 - `/health` reports process liveness without external calls.
-- `/ready` checks PostgreSQL, Redis, and a responding Celery worker.
+- `/ready` checks PostgreSQL, Redis, and a short-lived Redis heartbeat emitted by the Celery worker. It does not issue Celery control broadcasts.
 - `X-Request-ID` is accepted or generated and returned on every HTTP response.
 - Application logs are JSON and include request or import-job correlation fields.
 - AuditLog captures manual writes, access grants, subject enrollment, import submission, and retries. Routine GET requests are intentionally excluded.
