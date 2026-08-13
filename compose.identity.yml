@@ -1,0 +1,29 @@
+# Local identity/RLS overlay. It deliberately reads secrets only from the
+# ignored .env.identity.local file; do not use this development Keycloak over a
+# public network or without TLS.
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.6.3
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:?set KEYCLOAK_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
+    ports:
+      - "127.0.0.1:${KEYCLOAK_PORT:-8081}:8080"
+    volumes:
+      - ./deploy/keycloak:/opt/keycloak/data/import:ro
+      - keycloak_data:/opt/keycloak/data
+
+  api:
+    environment: &identity-environment
+      DATABASE_URL: postgresql+psycopg://clinical_app:${CLINICAL_APP_PASSWORD:?set CLINICAL_APP_PASSWORD}@postgres:5432/clinical_data_platform
+      AUTH_MODE: oidc
+      OIDC_ISSUER_URL: http://127.0.0.1:${KEYCLOAK_PORT:-8081}/realms/clinical
+      OIDC_AUDIENCE: clinical-data-platform-api
+      OIDC_JWKS_URL: http://keycloak:8080/realms/clinical/protocol/openid-connect/certs
+      ENABLE_DEMO_ADMIN_TOKEN: "false"
+  worker:
+    environment: *identity-environment
+
+volumes:
+  keycloak_data:

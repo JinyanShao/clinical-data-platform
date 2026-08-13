@@ -1,0 +1,16 @@
+{
+  "api_url": "http://127.0.0.1:8000",
+  "checks": {
+    "completed_import_jobs": 2,
+    "provenance_events": 1,
+    "readiness": "ready",
+    "researcher_patient_ids": [
+      "demo-csv-patient-001",
+      "demo-csv-patient-002",
+      "demo-csv-patient-003",
+      "demo-fhir-patient-001"
+    ],
+    "researcher_write_denied": 403
+  },
+  "result": "passed"
+}

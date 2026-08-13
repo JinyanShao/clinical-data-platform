@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import redis
 from fastapi import Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -16,6 +17,61 @@ from clinical_data_platform.celery_app import REDIS_URL, WORKER_HEARTBEAT_KEY
 from clinical_data_platform.session import SessionLocal
 
 request_id_context = contextvars.ContextVar("request_id", default=None)
+
+
+class RequestBodyTooLarge(Exception):
+    """Raised before an application handler can consume an oversized body."""
+
+
+class ContentSizeLimitMiddleware:
+    """Enforce a byte limit for both Content-Length and chunked requests.
+
+    Reverse proxies should apply the same (or stricter) limit. This guard is
+    still required because a client can omit Content-Length and stream a body.
+    """
+
+    def __init__(self, app, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        content_length = headers.get(b"content-length")
+        if content_length:
+            try:
+                if int(content_length) > self.max_bytes:
+                    await self._reject(scope, receive, send)
+                    return
+            except ValueError:
+                await self._reject(scope, receive, send)
+                return
+
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    raise RequestBodyTooLarge
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except RequestBodyTooLarge:
+            await self._reject(scope, receive, send)
+
+    async def _reject(self, scope, receive, send) -> None:
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": f"request body exceeds configured limit of {self.max_bytes} bytes"},
+        )
+        await response(scope, receive, send)
 
 
 class JsonFormatter(logging.Formatter):

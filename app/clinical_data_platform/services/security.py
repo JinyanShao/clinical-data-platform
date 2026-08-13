@@ -7,6 +7,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from clinical_data_platform.auth import Principal, hash_api_key
+from clinical_data_platform.config import settings
 from clinical_data_platform.exceptions import ConflictError, ForbiddenError, NotFoundError
 from clinical_data_platform.models import (
     AuditLog,
@@ -29,11 +30,20 @@ class UserService:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def create(self, username: str, role: str) -> tuple[User, str]:
+    def create(self, username: str, role: str, oidc_subject: str | None = None) -> tuple[User, str | None]:
         if self.session.scalar(sa.select(User).where(User.username == username)):
             raise ConflictError("username already exists")
-        api_key = secrets.token_urlsafe(32)
-        user = User(username=username, role=role, api_key_hash=hash_api_key(api_key))
+        if settings.auth_mode == "oidc" and not oidc_subject:
+            raise ConflictError("oidc_subject is required when OIDC authentication is enabled")
+        if oidc_subject and self.session.scalar(sa.select(User).where(User.oidc_subject == oidc_subject)):
+            raise ConflictError("OIDC subject already exists")
+        api_key = secrets.token_urlsafe(32) if settings.auth_mode == "api_key" else None
+        user = User(
+            username=username,
+            role=role,
+            oidc_subject=oidc_subject,
+            api_key_hash=hash_api_key(api_key or secrets.token_urlsafe(32)),
+        )
         self.session.add(user)
         self.session.flush()
         return user, api_key

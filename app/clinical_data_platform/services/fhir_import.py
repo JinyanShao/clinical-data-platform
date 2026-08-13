@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, NamedTuple
 
+from fhir.resources.R4B.encounter import Encounter as FhirEncounter
+from fhir.resources.R4B.observation import Observation as FhirObservation
+from fhir.resources.R4B.patient import Patient as FhirPatient
+from fhir.resources.R4B.researchstudy import ResearchStudy as FhirResearchStudy
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from clinical_data_platform.models import ImportJob
+from clinical_data_platform.services.fhir_validator import FhirValidator, configured_fhir_validator
 from clinical_data_platform.services.import_pipeline import (
     EncounterData,
     ImportBatch,
@@ -21,6 +28,12 @@ from clinical_data_platform.services.import_pipeline import (
 )
 
 SUPPORTED_RESOURCES = {"Patient", "Encounter", "Observation", "ResearchStudy"}
+FHIR_MODELS = {
+    "Patient": FhirPatient,
+    "Encounter": FhirEncounter,
+    "Observation": FhirObservation,
+    "ResearchStudy": FhirResearchStudy,
+}
 
 
 class ResourceRef(NamedTuple):
@@ -34,6 +47,9 @@ class ResourceRef(NamedTuple):
 
 
 class FhirBundleParser:
+    def __init__(self, validator: FhirValidator | None = None) -> None:
+        self.validator = validator or configured_fhir_validator()
+
     def parse(self, content: bytes) -> ImportBatch:
         try:
             bundle = json.loads(content)
@@ -47,9 +63,50 @@ class FhirBundleParser:
 
         aliases = self._aliases(entries)
         records = [self._entry(index, entry, aliases) for index, entry in enumerate(entries, start=1)]
+        self._apply_validator_issues(records, self.validator.validate(bundle))
         priority = {"Patient": 0, "ResearchStudy": 1, "Encounter": 2, "Observation": 3}
         records.sort(key=lambda item: priority.get(item.raw_data.get("resourceType"), 4))
         return ImportBatch(records)
+
+    @staticmethod
+    def _apply_validator_issues(records: list[ImportRecord], issues) -> None:
+        """Map error-level OperationOutcome issues to their Bundle entry.
+
+        The reference validator can report several issues for one entry while
+        the existing ImportError read model exposes one actionable error per
+        source row. Keep the first error deterministically; warnings do not
+        reject otherwise usable data. Operators can inspect the Validator's
+        full OperationOutcome in the worker output when diagnosing warnings.
+        """
+        by_row = {record.source_row: record for record in records}
+        for issue in issues:
+            if issue.severity not in {"fatal", "error"}:
+                continue
+            match = next(
+                (re.search(r"(?:Bundle\\.)?entry\[(\d+)\]", expression) for expression in issue.expression),
+                None,
+            )
+            row = int(match.group(1)) + 1 if match else None
+            if row is None or row not in by_row:
+                # A Bundle-level error cannot be safely attributed to one
+                # resource, so fail the first entry rather than import a
+                # potentially invalid collection silently.
+                row = records[0].source_row if records else None
+            if row is None:
+                continue
+            record = by_row[row]
+            if record.error is None:
+                record_index = records.index(record)
+                records[record_index] = ImportRecord(
+                    source_row=record.source_row,
+                    raw_data=record.raw_data,
+                    error=ImportRecordError(
+                        " | ".join(issue.expression) or "Bundle",
+                        f"FHIR_{issue.code.upper()}",
+                        issue.diagnostics,
+                    ),
+                )
+                by_row[row] = records[record_index]
 
     def _aliases(self, entries: list) -> dict[str, ResourceRef]:
         aliases: dict[str, ResourceRef] = {}
@@ -97,14 +154,33 @@ class FhirBundleParser:
                 raise ImportRecordError("resourceType", "UNSUPPORTED_RESOURCE", f"Unsupported FHIR resource: {resource_type}")
             resource_id = self._required(raw, "id")
             if resource_type == "Patient":
+                self._validate_resource(raw, resource_type)
                 return ImportRecord(index, raw, patient=self._patient(raw, resource_id))
             if resource_type == "Encounter":
+                self._validate_resource(raw, resource_type)
                 return ImportRecord(index, raw, encounter=self._encounter(raw, resource_id, aliases))
             if resource_type == "Observation":
+                self._validate_resource(raw, resource_type)
                 return ImportRecord(index, raw, observation=self._observation(raw, resource_id, aliases))
+            self._validate_resource(raw, resource_type)
             return ImportRecord(index, raw, research_study=self._study(raw, resource_id))
         except ImportRecordError as exc:
             return ImportRecord(index, raw, error=exc)
+
+    @staticmethod
+    def _validate_resource(resource: dict, resource_type: str) -> None:
+        """Validate only resources this v1 adapter owns.
+
+        A complete Bundle can contain other valid FHIR resources. Rejecting
+        the whole Bundle just because this scoped importer does not support
+        them would destroy its existing partial-import behavior.
+        """
+        try:
+            FHIR_MODELS[resource_type].model_validate(resource)
+        except ValidationError as exc:
+            first_error = exc.errors()[0]
+            location = ".".join(str(part) for part in first_error["loc"]) or resource_type
+            raise ImportRecordError(location, "FHIR_STRUCTURE_INVALID", first_error["msg"]) from exc
 
     def _patient(self, resource: dict, resource_id: str) -> PatientData:
         sex = resource.get("gender")

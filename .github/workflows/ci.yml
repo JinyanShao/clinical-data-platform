@@ -97,6 +97,27 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: clinical-data-platform:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Produce CycloneDX SBOM
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: clinical-data-platform:ci
+          format: cyclonedx
+          output: sbom.cdx.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: clinical-data-platform-sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
+      - name: Scan application image
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: clinical-data-platform:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH

@@ -383,6 +383,8 @@ class User(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     username: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    #: Stable OIDC ``sub`` claim. The human-readable username may change.
+    oidc_subject: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
     api_key_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     role: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
