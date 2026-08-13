@@ -12,7 +12,12 @@ from sqlalchemy.exc import IntegrityError
 from clinical_data_platform.api.v1 import router
 from clinical_data_platform.config import settings
 from clinical_data_platform.exceptions import BusinessRuleError, ConflictError, ForbiddenError, NotFoundError
-from clinical_data_platform.operations import RequestContextMiddleware, configure_logging, readiness_checks
+from clinical_data_platform.operations import (
+    ContentSizeLimitMiddleware,
+    RequestContextMiddleware,
+    configure_logging,
+    readiness_checks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(RequestContextMiddleware)
+app.add_middleware(ContentSizeLimitMiddleware, max_bytes=settings.max_upload_bytes)
 app.include_router(router)
 
 

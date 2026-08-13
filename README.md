@@ -1,237 +1,131 @@
 # Clinical Data Platform
 
-A FHIR-based backend that safely ingests clinical-research data, validates it, preserves provenance, and restricts access by study.
+FHIR-oriented backend platform for validated clinical-data ingestion, provenance, controlled access, and asynchronous processing.
 
-## Overview
+The repository is a working backend service for synthetic clinical-research data. It is not a FHIR server and makes no clinical-use or regulatory-compliance claim.
 
-Clinical Data Platform is a backend service designed to help clinical-research teams import inconsistent CSV exports and FHIR Bundles without losing data quality, traceability, or study-level access control.
+## What the platform handles
 
-The project focuses on:
+- **Studies** — research-study metadata, access grants, and subject enrolment.
+- **Subjects and clinical records** — patients, encounters, and observations, identified by `(source_namespace, external_id)` rather than a bare source ID.
+- **Ingestion and processing** — CSV and scoped FHIR Bundle imports run as idempotent background jobs with per-record results.
+- **Provenance** — source rows are retained as append-only records of creation and re-assertion.
+- **Access boundaries** — API roles and study assignments govern reads; PostgreSQL RLS provides a second boundary for runtime connections.
 
-* Normalized CSV and FHIR Bundle ingestion
-* Validation, partial-failure reporting, and idempotent imports
-* Provenance, audit records, and study-scoped authorization
-* Asynchronous processing with operational health checks
-
-## Problem
-
-Clinical research teams often receive data from several systems in inconsistent formats. A failed row must not prevent valid records from being imported, and records must remain traceable to the source that created or re-observed them.
-
-The system also needs to prevent researchers from accessing patients outside their assigned studies. Repeated uploads must be safe, references in FHIR payloads must be resolved consistently, and background work must expose actionable failure diagnostics.
-
-Typical challenges include:
-
-* Incomplete or invalid CSV rows and FHIR resources
-* Colliding external identifiers across data sources or studies
-* Repeated uploads creating duplicate clinical records
-* Unauthorized cross-study access to research subjects
-
-## Solution
-
-The system addresses these challenges by providing:
-
-* One normalized import pipeline for CSV files and scoped FHIR Bundles
-* Per-row or per-entry validation reports with `completed`, `partial`, and `failed` outcomes
-* Namespaced external identities and payload/study-aware idempotency
-* Role-based study access, provenance history, audit logs, and asynchronous workers
-
-## Current Status
-
-### Implemented
-
-* Import of CSV data and FHIR Bundles containing Patient, Encounter, Observation, and ResearchStudy resources
-* PostgreSQL persistence, Alembic migrations, Celery/Redis background processing, retries, and failure diagnostics
-* API-key roles for administrators, researchers, and auditors; study grants and research-subject isolation
-* JSON logs, request IDs, liveness/readiness endpoints, Docker Compose, tests, and CI
-
-### In Progress
-
-* Production-oriented deployment and identity-provider configuration documentation
-
-### Planned
-
-* OAuth2/OIDC-based production authentication
-* Object storage for large import payloads
-* Broader FHIR profile and terminology validation
-
-Planned capabilities are not included in the current release unless explicitly marked as implemented.
-
-## Architecture
+## System overview
 
 ```mermaid
 flowchart LR
-    Client[Research client] --> API[FastAPI API]
-    CSV[CSV upload] --> Pipeline[Shared import pipeline]
-    FHIR[FHIR Bundle] --> Pipeline
-    API --> Services[Domain services]
-    API --> Redis[(Redis)]
-    Redis --> Worker[Celery worker]
-    Worker --> Pipeline
-    Pipeline --> Services
-    Services --> DB[(PostgreSQL)]
-    Services --> Audit[Provenance and audit records]
+    Client["Client or data source"] --> API["FastAPI API"]
+    API --> Auth["OIDC/JWKS or development API key"]
+    API --> DB[("PostgreSQL")]
+    API --> Queue[("Redis")]
+    Queue --> Worker["Celery worker"]
+    Worker --> Import["CSV / FHIR import pipeline"]
+    Import --> DB
+    DB --> Provenance["Source records and audit log"]
+    Keycloak["Keycloak"] --> Auth
 ```
 
-### Main Components
+The API stores an import job before it is dispatched. The worker owns parsing and persistence, so an upload request does not need to remain open while records are processed.
 
-| Component | Responsibility |
-| --- | --- |
-| FastAPI API | Receives authenticated API requests and exposes OpenAPI documentation |
-| Import pipeline | Maps source-specific CSV/FHIR input into validated normalized records |
-| Domain services | Applies identity, idempotency, study-access, and persistence rules |
-| PostgreSQL | Stores clinical resources, import jobs, provenance, and audit data |
-| Celery and Redis | Execute asynchronous imports with retry and timeout handling |
+## Core workflows
 
-## Key Engineering Decisions
+1. **Create a study.** An administrator creates a `ResearchStudy`, creates or binds users, grants study access, and enrols patients as research subjects.
+2. **Import clinical data.** CSV or a FHIR Bundle is accepted as an `ImportJob`. The idempotency key incorporates payload, target study, and namespace.
+3. **Validate and process.** CSV rows or supported FHIR resources are normalized. Invalid entries become import errors without discarding valid entries; jobs finish as `completed`, `partial`, or `failed`.
+4. **Track provenance.** Each persisted resource is linked to a source row and import job. Re-importing a known resource records a re-assertion instead of overwriting history.
+5. **Query or export.** The API exposes clinical resources, jobs, source records, provenance, and audit records within the caller's study boundary. This repository currently exposes query APIs; it does not provide a bulk export format.
 
-### Shared normalized import pipeline
+## Data model
 
-**Decision:** CSV and FHIR parsers only map source-specific input; validation and domain services are shared.
-
-**Reason:** The same clinical rules, reporting behavior, and persistence guarantees apply regardless of input format.
-
-**Trade-off:** The currently supported CSV schema and FHIR resource scope are deliberately narrow.
-
-### Study-scoped namespaced identity
-
-**Decision:** External identity is stored as `(source_namespace, external_id)` and import idempotency includes payload, study, and namespace.
-
-**Reason:** Two sites can use the same local subject ID without accidentally merging patients.
-
-**Trade-off:** Intentional cross-study linkage requires an explicit shared namespace.
-
-## Technology Stack
-
-| Area | Technology |
-| --- | --- |
-| Language | Python 3.12 |
-| Framework | FastAPI, Pydantic |
-| Database | PostgreSQL, SQLAlchemy 2, Alembic |
-| Background work | Celery, Redis |
-| Testing | pytest, Coverage, Ruff |
-| Packaging | Docker Compose |
-| CI/CD | GitHub Actions |
-
-## Repository Structure
-
-```text
-.
-├── app/clinical_data_platform/  # API, domain services, models, and tasks
-├── alembic/                     # Database migrations
-├── demo/                        # Synthetic CSV and FHIR demonstration data
-├── docs/                        # Architecture, security, deployment, and demo notes
-├── scripts/                     # Repeatable demo verification
-├── tests/                       # Unit and integration tests
-├── docker-compose.yml
-└── README.md
+```mermaid
+erDiagram
+    RESEARCH_STUDY ||--o{ RESEARCH_SUBJECT : enrols
+    PATIENT ||--o{ RESEARCH_SUBJECT : participates
+    USER ||--o{ STUDY_ACCESS : receives
+    RESEARCH_STUDY ||--o{ STUDY_ACCESS : grants
+    PATIENT ||--o{ ENCOUNTER : has
+    PATIENT ||--o{ OBSERVATION : has
+    ENCOUNTER ||--o{ OBSERVATION : contextualises
+    RESEARCH_STUDY ||--o{ IMPORT_JOB : targets
+    IMPORT_JOB ||--o{ SOURCE_RECORD : records
+    IMPORT_JOB ||--o{ IMPORT_ERROR : reports
 ```
 
-## Getting Started
+`Patient`, `Encounter`, and `Observation` carry a namespaced source identity. `ResearchSubject` is the boundary between a patient and a study; it is intentionally separate from the patient record. `SourceRecord` preserves the source payload and its import context, while `AuditLog` records administrative and write actions.
 
-### Prerequisites
+## API and background processing
 
-* Docker with Compose v2
-* Git
+FastAPI serves the REST API and OpenAPI documentation at `/docs`. The main API groups are:
 
-### Installation
+- clinical resources: patients, encounters, observations;
+- research studies, subject enrolment, and access grants;
+- CSV/FHIR import submission, import status, row errors, and source records;
+- provenance, audit logs, liveness, and readiness.
+
+Celery workers consume jobs through Redis. PostgreSQL stores domain records, job state, provenance, and audit data. Alembic owns schema migrations. Import processing uses transactional persistence and retry-aware job transitions.
+
+## Security and isolation
+
+The development stack supports a local API-key bootstrap token. OIDC mode validates Keycloak access tokens locally against cached JWKS keys and requires exactly one application role: `admin`, `researcher`, or `auditor`.
+
+Study access is enforced in the service layer for patient, encounter, observation, study, and provenance reads. PostgreSQL RLS is enabled for clinical records and studies; API and worker processes are intended to connect as the non-owner `clinical_app` role. The request principal is set as transaction-local RLS context after authentication. Structured logs include request IDs, and write/access changes are recorded in the audit log.
+
+RLS does not protect connections using a PostgreSQL superuser or table owner. See [deployment notes](docs/deployment.md) before using OIDC/RLS outside the local stack.
+
+## Running locally
+
+Docker Compose is the shortest path:
 
 ```bash
-git clone https://github.com/JinyanShao/clinical-data-platform.git
-cd clinical-data-platform
+docker compose up --build --wait
+docker compose exec api python scripts/demo.py
+docker compose exec api python scripts/verify_demo.py
 ```
 
-### Configuration
+Open [http://localhost:8000/docs](http://localhost:8000/docs). The default stack uses synthetic data and the development-only `demo-admin-token`. If port 8000 is occupied, use `API_PORT=8001` with the Compose commands.
 
-The development Compose configuration provides synthetic data and a development-only bootstrap token. For production-oriented configuration, review `.env.production.example` and the deployment documentation.
-
-Never commit real credentials or secrets.
-
-### Run Locally
-
-```bash
-docker compose up --build
-```
-
-Open [http://localhost:8000/docs](http://localhost:8000/docs). The development-only administrator token is `demo-admin-token`.
+For the local Keycloak/OIDC and non-owner PostgreSQL configuration, follow [deployment notes](docs/deployment.md) and use `compose.identity.yml` with an ignored `.env.identity.local`.
 
 ## Testing
 
-Run the unit suite, linting, and coverage checks:
+The regular suite uses SQLite and eager Celery execution for fast unit and API coverage. It exercises imports, validation, authorization, job state transitions, and FHIR parsing.
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -c requirements.lock -e '.[dev]'
 .venv/bin/ruff check .
-.venv/bin/coverage run -m pytest -q -m 'not integration'
-.venv/bin/coverage report
+.venv/bin/pytest -q -m 'not integration'
 ```
 
-Run integration tests with disposable containers:
+Integration tests use Testcontainers to run PostgreSQL, Redis, and a Celery worker. They cover migrations, PostgreSQL constraints/JSONB, broker-backed imports, and RLS visibility under `clinical_app`.
 
 ```bash
 .venv/bin/python -m pytest -q -m integration --with-containers
 ```
 
-## Example Workflow
+GitHub Actions runs linting, tests, migration checks, image builds, SBOM generation, and image vulnerability scanning.
 
-1. An administrator creates or selects a synthetic ResearchStudy and grants a researcher access.
-2. A CSV file or FHIR Bundle is submitted for import.
-3. The shared pipeline validates and normalizes each record while preserving row-level failures.
-4. A background worker persists valid resources, provenance, and audit records.
-5. The researcher can query only patients belonging to authorized studies.
+## Current limitations
 
-Run the repeatable demonstration after Compose is healthy:
+- The importer supports `Patient`, `Encounter`, `Observation`, and `ResearchStudy`, not the full FHIR resource model or FHIR REST/search surface.
+- `fhir.resources` validates supported resource structure. The optional local HL7 Validator adapter is not a complete terminology service; production profile and terminology policy still need operator configuration.
+- Import payloads remain in PostgreSQL. Object storage, retention workflows, and malware scanning are not implemented.
+- OIDC and RLS are available, but the checked-in Compose stack remains a local development configuration. Production requires TLS, managed secrets, a Keycloak deployment, a non-owner runtime database role, backups, and operational monitoring.
+- There is no bulk export API, UI, or regulatory certification claim.
 
-```bash
-docker compose exec api python scripts/demo.py
-docker compose exec api python scripts/verify_demo.py
+## Repository structure
+
+```text
+app/clinical_data_platform/  API, models, services, and Celery tasks
+alembic/                     schema migrations
+deploy/keycloak/             local Keycloak realm import
+demo/                        synthetic CSV and FHIR data
+docs/                        deployment, security, and domain notes
+tests/                       unit, API, and integration coverage
 ```
-
-## Reliability and Safety
-
-The project includes the following reliability measures where applicable:
-
-* Input validation and partial-failure reports
-* Idempotent imports and namespaced external identities
-* Automated unit and integration tests
-* Database migrations and transactional persistence
-* Structured logging, request IDs, liveness, and readiness checks
-* Environment-based configuration and no committed production credentials
-
-## Limitations
-
-The current version does not yet include:
-
-* Full FHIR profile or terminology validation
-* OAuth2/OIDC production authentication
-* Production certification or a claim of HIPAA, GDPR, or Swiss FADP compliance
-
-These limitations are documented intentionally to distinguish implemented functionality from future work.
-
-## Roadmap
-
-* [ ] Add OAuth2/OIDC and managed identity for production deployments
-* [ ] Move retryable import payloads to object storage
-* [ ] Expand supported FHIR resources and terminology validation
-
-## Documentation
-
-Additional documentation is available in the `docs/` directory:
-
-* Architecture and domain model
-* Security and deployment guidance
-* Demonstration data and reproducible verification
-* Database schema and design decisions
 
 ## Licence
 
 No open-source licence has been assigned. All rights are reserved by the repository owner.
-
-## Author
-
-Jinyan Shao<br>
-Software Engineer — Business Applications, Backend and Automation
-
-* Website: [https://jinyanshao.ch](https://jinyanshao.ch/)
-* GitHub: [https://github.com/JinyanShao](https://github.com/JinyanShao)
-* LinkedIn: [https://www.linkedin.com/in/jinyanshao/](https://www.linkedin.com/in/jinyanshao/)

@@ -17,7 +17,16 @@ from pathlib import Path
 
 import pytest
 from alembic.config import Config
-from clinical_data_platform.models import AuditLog, ImportJob, Patient, SourceRecord
+from clinical_data_platform.models import (
+    AuditLog,
+    ImportJob,
+    Patient,
+    ResearchStudy,
+    ResearchSubject,
+    SourceRecord,
+    StudyAccess,
+    User,
+)
 from clinical_data_platform.services.csv_import import CSV_HEADERS, CsvImportService
 from clinical_data_platform.services.import_pipeline import ImportPipelineService
 from clinical_data_platform.tasks import dispatch_import
@@ -166,6 +175,33 @@ def test_namespaced_identity_is_enforced_by_postgresql(pg_session: Session) -> N
         select(func.count()).select_from(Patient).where(Patient.external_id == "P001")
     )
     assert count == 2
+
+
+@requires_postgres
+def test_postgresql_rls_hides_patients_outside_the_callers_study(pg_session: Session) -> None:
+    """A direct SQL query as the runtime role cannot bypass study isolation."""
+    user = User(username="rls-reader", oidc_subject="keycloak-subject", role="researcher", api_key_hash="x" * 64)
+    authorized_study = ResearchStudy(title="Authorized", status="active")
+    other_study = ResearchStudy(title="Other", status="active")
+    authorized_patient = Patient(external_id="rls-authorized")
+    other_patient = Patient(external_id="rls-other")
+    pg_session.add_all([user, authorized_study, other_study, authorized_patient, other_patient])
+    pg_session.flush()
+    pg_session.add_all(
+        [
+            StudyAccess(study_id=authorized_study.id, user_id=user.id),
+            ResearchSubject(study_id=authorized_study.id, patient_id=authorized_patient.id),
+            ResearchSubject(study_id=other_study.id, patient_id=other_patient.id),
+        ]
+    )
+    pg_session.commit()
+
+    pg_session.execute(text("SET ROLE clinical_app"))
+    pg_session.execute(text("SELECT set_config('app.user_id', :user_id, false)"), {"user_id": str(user.id)})
+    pg_session.execute(text("SELECT set_config('app.role', 'researcher', false)"))
+    visible = pg_session.scalars(select(Patient.external_id).order_by(Patient.external_id)).all()
+
+    assert visible == ["rls-authorized"]
 
 
 @requires_postgres

@@ -4,7 +4,15 @@ __pycache__/
 .pytest_cache/
 .venv/
 .env
+.env.identity.local
 .coverage
+htmlcov/
 *.db
 *.egg-info/
 .ruff_cache/
+.mypy_cache/
+.pytest_cache/
+dist/
+build/
+*.log
+logs/

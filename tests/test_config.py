@@ -18,6 +18,12 @@ def _settings(**overrides) -> Settings:
         database_url="postgresql+psycopg://user:pw@db/app",
         database_url_was_explicit=True,
         redis_url="redis://redis:6379/0",
+        max_upload_bytes=10 * 1024 * 1024,
+        fhir_validator_jar=None,
+        auth_mode="oidc",
+        oidc_issuer_url="https://keycloak.example/realms/clinical",
+        oidc_audience="clinical-data-platform-api",
+        oidc_jwks_url=None,
     )
     base.update(overrides)
     return Settings(**base)
@@ -41,14 +47,14 @@ def test_demo_token_requires_explicit_opt_in_even_in_development() -> None:
 
 
 def test_demo_token_available_when_explicitly_enabled_in_development() -> None:
-    settings = _settings(environment="development", enable_demo_admin_token=True)
+    settings = _settings(environment="development", auth_mode="api_key", enable_demo_admin_token=True)
     settings.validate()
     assert settings.bootstrap_admin_token == DEMO_ADMIN_TOKEN
 
 
 def test_operator_supplied_key_wins_over_demo_token() -> None:
     settings = _settings(
-        environment="development", enable_demo_admin_token=True, admin_api_key="real-secret"
+        environment="development", auth_mode="api_key", enable_demo_admin_token=True, admin_api_key="real-secret"
     )
     settings.validate()
     assert settings.bootstrap_admin_token == "real-secret"
@@ -80,6 +86,23 @@ def test_unknown_environment_is_rejected() -> None:
 def test_blank_admin_key_is_rejected() -> None:
     with pytest.raises(ConfigurationError, match="ADMIN_API_KEY is set but empty"):
         _settings(admin_api_key="   ").validate()
+
+
+def test_nonpositive_upload_limit_is_rejected() -> None:
+    with pytest.raises(ConfigurationError, match="MAX_UPLOAD_BYTES"):
+        _settings(max_upload_bytes=0).validate()
+
+
+def test_oidc_requires_issuer_and_audience() -> None:
+    with pytest.raises(ConfigurationError, match="OIDC_ISSUER_URL"):
+        _settings(auth_mode="oidc", oidc_issuer_url=None).validate()
+    with pytest.raises(ConfigurationError, match="OIDC_AUDIENCE"):
+        _settings(auth_mode="oidc", oidc_audience=None).validate()
+
+
+def test_api_key_authentication_is_development_only() -> None:
+    with pytest.raises(ConfigurationError, match="api_key is permitted"):
+        _settings(auth_mode="api_key").validate()
 
 
 def test_namespace_defaults_isolate_by_study() -> None:

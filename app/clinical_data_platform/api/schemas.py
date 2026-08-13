@@ -206,13 +206,14 @@ Role = Literal["admin", "researcher", "auditor"]
 class UserCreate(BaseModel):
     username: str = Field(min_length=1)
     role: Role
+    oidc_subject: str | None = Field(default=None, min_length=1)
 
 
 class UserCreated(BaseModel):
     id: UUID
     username: str
     role: Role
-    api_key: str
+    api_key: str | None
 
 
 class StudyAccessRead(BaseModel):

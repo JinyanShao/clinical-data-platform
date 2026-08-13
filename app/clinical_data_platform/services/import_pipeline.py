@@ -158,15 +158,26 @@ class ImportPipelineService:
             if existing_job.status == "failed":
                 return self.job_service.mark_pending_for_retry(existing_job.id)
             return existing_job
-        return self.job_service.create(
-            source_type,
-            filename,
-            file_checksum=file_checksum,
-            idempotency_key=idempotency_key,
-            source_namespace=namespace,
-            payload=content,
-            study_id=study_id,
-        )
+        # The initial lookup makes the normal duplicate path cheap. The unique
+        # constraint remains the authority, however: concurrent requests can
+        # both observe "missing". A savepoint lets us absorb that race without
+        # rolling back unrelated work in the caller's outer transaction.
+        try:
+            with self.session.begin_nested():
+                return self.job_service.create(
+                    source_type,
+                    filename,
+                    file_checksum=file_checksum,
+                    idempotency_key=idempotency_key,
+                    source_namespace=namespace,
+                    payload=content,
+                    study_id=study_id,
+                )
+        except sa.exc.IntegrityError:
+            existing_job = self.jobs.get_by_idempotency_key(idempotency_key)
+            if existing_job:
+                return existing_job
+            raise
 
     def process(self, job: ImportJob, parser: ImportParser) -> ImportJob:
         if not job.payload:

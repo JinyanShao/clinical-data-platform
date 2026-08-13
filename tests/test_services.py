@@ -12,6 +12,7 @@ from clinical_data_platform.services import (
     ObservationService,
     PatientService,
 )
+from clinical_data_platform.services.import_pipeline import ImportPipelineService
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
@@ -124,3 +125,23 @@ def test_import_job_rejects_illegal_status_transition(session: Session) -> None:
 
     with pytest.raises(ValueError, match="cannot transition"):
         service.set_status(import_job.id, "completed")
+
+
+def test_import_enqueue_recovers_from_a_concurrent_idempotency_insert(session: Session, monkeypatch) -> None:
+    pipeline = ImportPipelineService(session)
+    content = b"same-upload"
+    first = pipeline.enqueue("csv", "first.csv", content)
+    session.flush()
+
+    original_lookup = pipeline.jobs.get_by_idempotency_key
+    lookups = 0
+
+    def delayed_lookup(idempotency_key: str):
+        nonlocal lookups
+        lookups += 1
+        return None if lookups == 1 else original_lookup(idempotency_key)
+
+    monkeypatch.setattr(pipeline.jobs, "get_by_idempotency_key", delayed_lookup)
+    recovered = pipeline.enqueue("csv", "repeat.csv", content)
+
+    assert recovered.id == first.id

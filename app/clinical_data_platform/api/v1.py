@@ -202,7 +202,7 @@ def delete_research_study(study_id: UUID, session: Session = Depends(get_session
 
 @router.post("/users", response_model=UserCreated, status_code=201, tags=["Access Control"])
 def create_user(payload: UserCreate, session: Session = Depends(get_session), actor: Principal = Depends(admin)):
-    user, api_key = UserService(session).create(payload.username, payload.role)
+    user, api_key = UserService(session).create(payload.username, payload.role, payload.oidc_subject)
     AuditService(session).record(actor, "create", "User", user.id, after={"username": user.username, "role": user.role})
     return UserCreated(id=user.id, username=user.username, role=user.role, api_key=api_key)
 
