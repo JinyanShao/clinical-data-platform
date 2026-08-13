@@ -11,12 +11,15 @@ from clinical_data_platform.models import ImportJob
 from clinical_data_platform.services.csv_import import CsvImportService
 from clinical_data_platform.services.fhir_import import FhirImportService
 from clinical_data_platform.services.import_job import ImportJobService
-from clinical_data_platform.session import SessionLocal
+from clinical_data_platform.session import SessionLocal, set_rls_context
 
 logger = logging.getLogger(__name__)
 
 
 def process_import_job(session: Session, import_job_id: UUID) -> ImportJob:
+    # Workers are trusted service actors. This transaction-local context is
+    # required when the worker uses the non-owner runtime RLS database role.
+    set_rls_context(session, None, "admin")
     service = ImportJobService(session)
     job = service.repo.get_by_id(import_job_id)
     if not job:
@@ -44,6 +47,7 @@ def process_import_job(session: Session, import_job_id: UUID) -> ImportJob:
 def _fail(session: Session, import_job_id: UUID, reason: str) -> ImportJob | None:
     """Roll back the failed attempt and record the failure via the state machine."""
     session.rollback()
+    set_rls_context(session, None, "admin")
     job = ImportJobService(session).mark_failed(import_job_id, reason)
     session.commit()
     return job
@@ -51,6 +55,7 @@ def _fail(session: Session, import_job_id: UUID, reason: str) -> ImportJob | Non
 
 def _requeue(session: Session, import_job_id: UUID) -> ImportJob | None:
     """Open a new attempt, but only from a state the machine permits."""
+    set_rls_context(session, None, "admin")
     service = ImportJobService(session)
     job = service.repo.get_by_id(import_job_id)
     if not job or not service.can_transition(job.status, "pending"):

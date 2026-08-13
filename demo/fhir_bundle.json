@@ -3,7 +3,7 @@
   "type": "collection",
   "entry": [
     {
-      "fullUrl": "urn:uuid:demo-fhir-patient-001",
+      "fullUrl": "urn:uuid:6c3f4802-f489-4b29-a66d-90a73c91d3cc",
       "resource": {
         "resourceType": "Patient",
         "id": "demo-fhir-patient-001",
@@ -12,13 +12,13 @@
       }
     },
     {
-      "fullUrl": "urn:uuid:demo-fhir-encounter-001",
+      "fullUrl": "urn:uuid:0b78f392-00e4-4d51-8660-bddaa9ec2b91",
       "resource": {
         "resourceType": "Encounter",
         "id": "demo-fhir-encounter-001",
         "status": "finished",
-        "class": {"code": "AMB"},
-        "subject": {"reference": "urn:uuid:demo-fhir-patient-001"},
+        "class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB"},
+        "subject": {"reference": "urn:uuid:6c3f4802-f489-4b29-a66d-90a73c91d3cc"},
         "period": {
           "start": "2026-01-15T08:00:00Z",
           "end": "2026-01-15T08:40:00Z"
@@ -26,6 +26,7 @@
       }
     },
     {
+      "fullUrl": "urn:uuid:a6065895-971a-4c96-b2c6-4b65a44fe6f8",
       "resource": {
         "resourceType": "Observation",
         "id": "demo-fhir-observation-001",
@@ -35,13 +36,14 @@
             {"system": "http://loinc.org", "code": "718-7"}
           ]
         },
-        "subject": {"reference": "urn:uuid:demo-fhir-patient-001"},
-        "encounter": {"reference": "urn:uuid:demo-fhir-encounter-001"},
+        "subject": {"reference": "urn:uuid:6c3f4802-f489-4b29-a66d-90a73c91d3cc"},
+        "encounter": {"reference": "urn:uuid:0b78f392-00e4-4d51-8660-bddaa9ec2b91"},
         "valueQuantity": {"value": 5.4, "unit": "mmol/L"},
         "effectiveDateTime": "2026-01-15T08:20:00Z"
       }
     },
     {
+      "fullUrl": "urn:uuid:0de55c2d-b85d-47cb-af46-c645ce5b03ca",
       "resource": {
         "resourceType": "ResearchStudy",
         "id": "demo-fhir-study-resource",

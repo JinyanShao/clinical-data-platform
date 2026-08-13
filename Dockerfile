@@ -6,7 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN python -m venv /opt/venv
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y default-jre-headless \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m venv /opt/venv
 COPY pyproject.toml requirements.lock README.md ./
 COPY app ./app
 RUN pip install --no-cache-dir -c requirements.lock .

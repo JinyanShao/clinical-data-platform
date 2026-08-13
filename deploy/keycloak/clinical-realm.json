@@ -1,0 +1,39 @@
+{
+  "realm": "clinical",
+  "enabled": true,
+  "displayName": "Clinical Data Platform",
+  "roles": {
+    "realm": [
+      {"name": "admin", "description": "Clinical Data Platform administrator"},
+      {"name": "researcher", "description": "Study-scoped clinical data researcher"},
+      {"name": "auditor", "description": "Cross-study audit reader"}
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "clinical-data-platform-api",
+      "name": "Clinical Data Platform API",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://127.0.0.1:*"],
+      "webOrigins": ["http://127.0.0.1:*"],
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "clinical-data-platform-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ]
+}

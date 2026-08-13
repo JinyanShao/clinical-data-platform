@@ -23,6 +23,7 @@ DEVELOPMENT = "development"
 STAGING = "staging"
 PRODUCTION = "production"
 VALID_ENVIRONMENTS = (DEVELOPMENT, STAGING, PRODUCTION)
+AUTH_MODES = ("api_key", "oidc")
 
 #: Only ever usable when ``ENABLE_DEMO_ADMIN_TOKEN`` is explicitly true and the
 #: environment is ``development``. Never a fallback.
@@ -54,6 +55,12 @@ class Settings:
     database_url: str
     database_url_was_explicit: bool
     redis_url: str
+    max_upload_bytes: int
+    fhir_validator_jar: str | None
+    auth_mode: str
+    oidc_issuer_url: str | None
+    oidc_audience: str | None
+    oidc_jwks_url: str | None
 
     @property
     def is_development(self) -> bool:
@@ -71,7 +78,7 @@ class Settings:
         honoured in every environment. The hard-coded demo token is only
         returned when it has been switched on deliberately.
         """
-        if self.admin_api_key:
+        if self.auth_mode == "api_key" and self.admin_api_key:
             return self.admin_api_key
         if self.enable_demo_admin_token:
             return DEMO_ADMIN_TOKEN
@@ -106,6 +113,19 @@ class Settings:
                 "Refusing to fall back to a local SQLite file."
             )
 
+        if self.max_upload_bytes <= 0:
+            problems.append("MAX_UPLOAD_BYTES must be a positive integer.")
+
+        if self.auth_mode not in AUTH_MODES:
+            problems.append(f"AUTH_MODE must be one of {', '.join(AUTH_MODES)}; got {self.auth_mode!r}.")
+        if self.auth_mode == "oidc":
+            if not self.oidc_issuer_url:
+                problems.append("OIDC_ISSUER_URL is required when AUTH_MODE=oidc.")
+            if not self.oidc_audience:
+                problems.append("OIDC_AUDIENCE is required when AUTH_MODE=oidc.")
+        elif self.auth_mode == "api_key" and self.environment != DEVELOPMENT:
+            problems.append("AUTH_MODE=api_key is permitted only when ENVIRONMENT=development.")
+
         if problems:
             raise ConfigurationError(
                 "Refusing to start due to unsafe configuration:\n  - " + "\n  - ".join(problems)
@@ -114,13 +134,25 @@ class Settings:
 
 def load_settings() -> Settings:
     database_url = os.getenv("DATABASE_URL")
+    try:
+        max_upload_bytes = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+    except ValueError:
+        max_upload_bytes = 0
+    environment = os.getenv("ENVIRONMENT", PRODUCTION).strip().lower()
+    auth_mode = os.getenv("AUTH_MODE", "api_key" if environment == DEVELOPMENT else "oidc").strip().lower()
     return Settings(
-        environment=os.getenv("ENVIRONMENT", PRODUCTION).strip().lower(),
+        environment=environment,
         admin_api_key=os.getenv("ADMIN_API_KEY"),
         enable_demo_admin_token=_flag("ENABLE_DEMO_ADMIN_TOKEN"),
         database_url=database_url or DEVELOPMENT_DATABASE_URL,
         database_url_was_explicit=bool(database_url),
         redis_url=os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"),
+        max_upload_bytes=max_upload_bytes,
+        fhir_validator_jar=os.getenv("FHIR_VALIDATOR_JAR") or None,
+        auth_mode=auth_mode,
+        oidc_issuer_url=os.getenv("OIDC_ISSUER_URL", "").rstrip("/") or None,
+        oidc_audience=os.getenv("OIDC_AUDIENCE") or None,
+        oidc_jwks_url=os.getenv("OIDC_JWKS_URL") or None,
     )
 
 

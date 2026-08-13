@@ -1,0 +1,27 @@
+# Production-oriented overlay. Use with docker-compose.yml and an operator-owned
+# .env file; never commit the populated .env file.
+services:
+  postgres:
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+  redis:
+    ports: !reset []
+  migrate:
+    environment: &production-environment
+      ENVIRONMENT: production
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+      AUTH_MODE: ${AUTH_MODE:-oidc}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?set OIDC_ISSUER_URL}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:?set OIDC_AUDIENCE}
+      OIDC_JWKS_URL: ${OIDC_JWKS_URL:-}
+      ENABLE_DEMO_ADMIN_TOKEN: "false"
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      FHIR_VALIDATOR_JAR: ${FHIR_VALIDATOR_JAR:-}
+  api:
+    environment: *production-environment
+    ports:
+      - "127.0.0.1:8000:8000"
+  worker:
+    environment: *production-environment
