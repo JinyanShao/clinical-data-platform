@@ -108,7 +108,7 @@ jobs:
           format: cyclonedx
           output: sbom.cdx.json
       - name: Upload SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: clinical-data-platform-sbom
           path: sbom.cdx.json
