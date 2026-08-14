@@ -11,8 +11,10 @@ supplies via service containers.
 from __future__ import annotations
 
 import os
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -30,7 +32,7 @@ from clinical_data_platform.models import (
 from clinical_data_platform.services.csv_import import CSV_HEADERS, CsvImportService
 from clinical_data_platform.services.import_pipeline import ImportPipelineService
 from clinical_data_platform.tasks import dispatch_import
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
@@ -73,14 +75,21 @@ def _alembic_config() -> Config:
     return config
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def pg_engine():
+    """Create a fresh migrated schema for every integration test.
+
+    A rollback cannot remove rows that a test deliberately commits. Recreating
+    the public schema prevents those committed rows, sequences, and background
+    worker results from leaking into the next test in the module.
+    """
     engine = create_engine(DATABASE_URL, future=True)
     with engine.begin() as connection:
         connection.execute(text("DROP SCHEMA public CASCADE"))
         connection.execute(text("CREATE SCHEMA public"))
     command.upgrade(_alembic_config(), "head")
-    return engine
+    yield engine
+    engine.dispose()
 
 
 @pytest.fixture()
@@ -92,7 +101,7 @@ def pg_session(pg_engine):
 
 
 @requires_postgres
-def test_migrations_round_trip_on_postgresql() -> None:
+def test_migrations_round_trip_on_postgresql(pg_engine) -> None:  # noqa: ARG001
     config = _alembic_config()
     command.upgrade(config, "head")
     command.downgrade(config, "base")
@@ -100,12 +109,11 @@ def test_migrations_round_trip_on_postgresql() -> None:
 
 
 @requires_postgres
-def test_upgrade_backfills_namespace_on_existing_patient() -> None:
+def test_upgrade_backfills_namespace_on_existing_patient(pg_engine) -> None:
     config = _alembic_config()
     command.downgrade(config, "20260725_0004")
-    engine = create_engine(DATABASE_URL, future=True)
     patient_id = uuid.uuid4()
-    with engine.begin() as connection:
+    with pg_engine.begin() as connection:
         connection.execute(
             text(
                 "INSERT INTO patients (id, external_id, birth_date, sex) "
@@ -114,7 +122,7 @@ def test_upgrade_backfills_namespace_on_existing_patient() -> None:
             {"id": patient_id},
         )
     command.upgrade(config, "head")
-    with engine.connect() as connection:
+    with pg_engine.connect() as connection:
         row = connection.execute(
             text("SELECT external_id, source_namespace FROM patients WHERE id = :id"),
             {"id": patient_id},
@@ -225,6 +233,48 @@ def test_idempotency_key_allows_the_same_file_per_target(pg_session: Session) ->
         )
         == 2
     )
+
+
+@requires_postgres
+def test_concurrent_uploads_share_one_idempotent_import_job(pg_engine) -> None:
+    """Two real PostgreSQL transactions race on the same idempotency key.
+
+    The barrier holds both sessions immediately after their initial empty
+    lookup. One insert wins; the other must recover from PostgreSQL's unique
+    constraint and return that same job rather than surface an IntegrityError.
+    """
+    factory = sessionmaker(bind=pg_engine, expire_on_commit=False, future=True)
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    initial_lookups_remaining = 2
+
+    @event.listens_for(pg_engine, "before_cursor_execute")
+    def synchronise_initial_lookups(connection, cursor, statement, parameters, context, executemany):  # noqa: ARG001
+        nonlocal initial_lookups_remaining
+        normalized = statement.lower()
+        if "from import_jobs" not in normalized or "idempotency_key" not in normalized:
+            return
+        with lock:
+            if initial_lookups_remaining == 0:
+                return
+            initial_lookups_remaining -= 1
+        barrier.wait(timeout=10)
+
+    def enqueue_in_own_transaction():
+        with factory() as session:
+            job = ImportPipelineService(session).enqueue("csv", "concurrent.csv", _csv_bytes("concurrent-patient"))
+            session.commit()
+            return job.id
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            job_ids = list(executor.map(lambda _: enqueue_in_own_transaction(), range(2)))
+    finally:
+        event.remove(pg_engine, "before_cursor_execute", synchronise_initial_lookups)
+
+    assert job_ids[0] == job_ids[1]
+    with Session(pg_engine) as session:
+        assert session.scalar(select(func.count()).select_from(ImportJob)) == 1
 
 
 @requires_redis
