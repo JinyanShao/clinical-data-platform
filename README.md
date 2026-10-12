@@ -128,4 +128,4 @@ tests/                       unit, API, and integration coverage
 
 ## Licence
 
-No open-source licence has been assigned. All rights are reserved by the repository owner.
+MIT. See [LICENSE](LICENSE).
